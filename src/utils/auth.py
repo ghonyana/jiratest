@@ -71,8 +71,8 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 from google.auth.exceptions import GoogleAuthError
 
-from utils.logging_config import get_logger
-from utils.metrics_collector import increment_error
+from src.utils.logging_config import get_logger
+from src.utils.metrics_collector import increment_error
 
 
 # Initialize structured logger for authentication events
