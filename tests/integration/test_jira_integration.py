@@ -2,8 +2,8 @@
 Integration Tests for Jira API Operations
 
 This module provides comprehensive integration tests for the JiraIntegrationService
-class, validating all Jira API operations using the responses library to mock HTTP
-requests without making actual external API calls.
+class, validating all Jira API operations using unittest.mock to mock the JIRA client
+methods without making actual external API calls.
 
 Per Section 0.5.1 Group 9 and Technical Specification Section 6.6, these tests verify:
 - JQL-based fingerprint search with correct query construction
@@ -15,8 +15,8 @@ Per Section 0.5.1 Group 9 and Technical Specification Section 6.6, these tests v
 - PII sanitization in issue summaries and descriptions
 
 Test Strategy:
-The responses library intercepts all HTTP requests to the Jira REST API, allowing us to:
-- Validate request payloads (URL, method, headers, JSON body)
+We use unittest.mock to mock the JIRA client methods, allowing us to:
+- Validate that correct methods are called with expected parameters
 - Simulate various response scenarios (success, transient errors, permanent errors)
 - Test retry logic without waiting for actual network delays
 - Ensure no actual external API calls are made during test execution
@@ -39,10 +39,11 @@ Version: 1.0.0
 import json
 from datetime import datetime
 from typing import Dict, Any, Optional, List
+from unittest.mock import Mock, MagicMock, patch, call
 
 import pytest
-import responses
 from jira import JIRA
+from jira.exceptions import JIRAError
 
 # Internal imports - Services under test
 from src.services.jira_integration import JiraIntegrationService
@@ -78,7 +79,7 @@ class TestJiraIntegration:
     - Rate limit handling (429 responses)
     - PII sanitization validation in issue content
     
-    All tests use the @responses.activate decorator to intercept HTTP requests.
+    All tests use unittest.mock to mock JIRA client methods.
     """
     
     # Test constants
@@ -87,21 +88,20 @@ class TestJiraIntegration:
     TEST_FINGERPRINT = "a3f5b9c8d2e1f4g6h8j9k0m1n3p5q7r9s0t2u4v6w8x0y2z4"
     
     @pytest.fixture
-    def jira_client(self) -> JIRA:
+    def jira_client(self) -> Mock:
         """
-        Create JIRA client instance for testing.
+        Create mocked JIRA client instance for testing.
         
-        Returns authenticated JIRA client configured with test base URL
-        and mock credentials. The actual HTTP requests will be intercepted
-        by the responses library in decorated tests.
+        Returns a Mock object that simulates the JIRA client interface.
+        This allows us to test the JiraIntegrationService without making
+        actual HTTP requests to the Jira API.
         
         Returns:
-            JIRA client instance configured for testing
+            Mock JIRA client instance
         """
-        return JIRA(
-            server=self.JIRA_BASE_URL,
-            basic_auth=("test@example.com", "test_api_token_12345")
-        )
+        mock_client = MagicMock(spec=JIRA)
+        mock_client._options = {'server': self.JIRA_BASE_URL}
+        return mock_client
     
     @pytest.fixture
     def sanitizer(self) -> PIISanitizer:
@@ -114,7 +114,7 @@ class TestJiraIntegration:
         Returns:
             PIISanitizer instance for PII removal
         """
-        return PIISanitizer(yaml_path='config/sanitization_patterns.yaml')
+        return PIISanitizer(config_path='config/sanitization_patterns.yaml')
     
     @pytest.fixture
     def jira_service(self, jira_client: JIRA, sanitizer: PIISanitizer) -> JiraIntegrationService:
@@ -173,41 +173,28 @@ class TestJiraIntegration:
     # Test 1: search_issue_by_fingerprint returns issue key
     # =========================================================================
     
-    @responses.activate
-    def test_search_issue_by_fingerprint_returns_issue_key(self, jira_service: JiraIntegrationService):
+    def test_search_issue_by_fingerprint_returns_issue_key(self, jira_client: Mock, jira_service: JiraIntegrationService):
         """
         Test that search_issue_by_fingerprint returns issue key when issue exists.
         
         Validates:
         - JQL query is correctly constructed with project, fingerprint label, and status filter
-        - HTTP GET request to /rest/api/3/search endpoint
+        - search_issues method is called on JIRA client with correct JQL
         - Response parsing extracts issue key from first result
         - Method returns issue key string when issue found
         
         Per Section 0.5.1 Group 5, JQL pattern:
         project = ET AND labels = "errfp:{fingerprint}" AND statusCategory != Done
         """
-        # Arrange - Mock Jira API search response with existing issue
-        responses.add(
-            method=responses.GET,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/search',
-            json={
-                'issues': [
-                    {
-                        'key': 'ET-1234',
-                        'fields': {
-                            'summary': '[prod:web-app] TypeError — Cannot read property...',
-                            'status': {
-                                'name': 'Open',
-                                'statusCategory': {'name': 'To Do'}
-                            },
-                            'priority': {'name': 'Medium'}
-                        }
-                    }
-                ]
-            },
-            status=200
-        )
+        # Arrange - Mock Jira issue object
+        mock_issue = Mock()
+        mock_issue.key = 'ET-1234'
+        mock_issue.fields.summary = '[prod:web-app] TypeError — Cannot read property...'
+        mock_issue.fields.status.name = 'Open'
+        mock_issue.fields.priority.name = 'Medium'
+        
+        # Configure mock to return list with one issue
+        jira_client.search_issues.return_value = [mock_issue]
         
         # Act - Search for issue by fingerprint
         result = jira_service.search_issue_by_fingerprint(self.TEST_FINGERPRINT)
@@ -215,22 +202,23 @@ class TestJiraIntegration:
         # Assert - Issue key returned
         assert result == 'ET-1234', "Expected issue key 'ET-1234' to be returned"
         
-        # Assert - HTTP request made with correct JQL query
-        assert len(responses.calls) == 1, "Expected exactly one API call"
-        request = responses.calls[0].request
-        
-        # Verify JQL query in request URL
+        # Assert - search_issues called with correct JQL query
         expected_jql = f'project = {self.PROJECT_KEY} AND labels = "errfp:{self.TEST_FINGERPRINT}" AND statusCategory != Done'
-        assert 'jql=' in request.url, "Expected JQL query parameter in URL"
-        assert self.TEST_FINGERPRINT in request.url, "Expected fingerprint in JQL query"
-        assert 'statusCategory' in request.url, "Expected statusCategory filter in JQL query"
+        jira_client.search_issues.assert_called_once()
+        call_args = jira_client.search_issues.call_args
+        
+        # Verify JQL query in call
+        actual_jql = call_args[0][0]  # First positional argument
+        assert actual_jql == expected_jql, f"Expected JQL query to match. Got: {actual_jql}"
+        
+        # Verify maxResults parameter
+        assert call_args[1]['maxResults'] == 1, "Expected maxResults=1"
     
     # =========================================================================
     # Test 2: search_issue_by_fingerprint returns None when not found
     # =========================================================================
     
-    @responses.activate
-    def test_search_issue_by_fingerprint_returns_none_when_not_found(self, jira_service: JiraIntegrationService):
+    def test_search_issue_by_fingerprint_returns_none_when_not_found(self, jira_client: Mock, jira_service: JiraIntegrationService):
         """
         Test that search_issue_by_fingerprint returns None when no matching issue exists.
         
@@ -239,28 +227,23 @@ class TestJiraIntegration:
         - Method returns None to indicate no existing issue
         - Allows calling code to proceed with issue creation
         """
-        # Arrange - Mock Jira API search response with no results
-        responses.add(
-            method=responses.GET,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/search',
-            json={'issues': []},
-            status=200
-        )
+        # Arrange - Mock Jira client to return empty list
+        jira_client.search_issues.return_value = []
         
         # Act - Search for non-existent fingerprint
         result = jira_service.search_issue_by_fingerprint('nonexistent-fingerprint')
         
         # Assert - None returned when no issue found
         assert result is None, "Expected None when no issue found"
-        assert len(responses.calls) == 1, "Expected exactly one API call"
+        jira_client.search_issues.assert_called_once()
     
     # =========================================================================
     # Test 3: create_bug_issue with all fields
     # =========================================================================
     
-    @responses.activate
     def test_create_bug_issue_with_all_fields(
         self,
+        jira_client: Mock,
         jira_service: JiraIntegrationService,
         sample_error_event: NormalizedErrorEvent
     ):
@@ -281,16 +264,10 @@ class TestJiraIntegration:
         
         Per Section 0.5.1 Group 5 requirements.
         """
-        # Arrange - Mock Jira API create issue response
-        responses.add(
-            method=responses.POST,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/issue',
-            json={
-                'key': 'ET-5678',
-                'self': f'{self.JIRA_BASE_URL}/rest/api/3/issue/ET-5678'
-            },
-            status=201
-        )
+        # Arrange - Mock Jira client create_issue method
+        mock_issue = Mock()
+        mock_issue.key = 'ET-5678'
+        jira_client.create_issue.return_value = mock_issue
         
         # Act - Create bug issue with all fields
         issue_key = jira_service.create_bug_issue(
@@ -303,12 +280,13 @@ class TestJiraIntegration:
         
         # Assert - Issue key returned
         assert issue_key == 'ET-5678', "Expected created issue key 'ET-5678'"
-        assert len(responses.calls) == 1, "Expected exactly one API call"
         
-        # Extract request payload for validation
-        request = responses.calls[0].request
-        request_body = json.loads(request.body)
-        fields = request_body['fields']
+        # Verify create_issue was called once
+        jira_client.create_issue.assert_called_once()
+        
+        # Extract fields from the call
+        call_kwargs = jira_client.create_issue.call_args.kwargs
+        fields = call_kwargs['fields']
         
         # Validate project key
         assert fields['project']['key'] == self.PROJECT_KEY, "Expected correct project key"
@@ -353,9 +331,9 @@ class TestJiraIntegration:
     # Test 4: create_bug_issue with component assignment
     # =========================================================================
     
-    @responses.activate
     def test_create_bug_issue_with_component_assignment(
         self,
+        jira_client: Mock,
         jira_service: JiraIntegrationService,
         sample_error_event: NormalizedErrorEvent
     ):
@@ -369,13 +347,10 @@ class TestJiraIntegration:
         
         Per Section 0.1.1 requirement #5 for ownership routing patterns.
         """
-        # Arrange - Mock Jira API create issue response
-        responses.add(
-            method=responses.POST,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/issue',
-            json={'key': 'ET-9012'},
-            status=201
-        )
+        # Arrange - Mock Jira client create_issue method
+        mock_issue = Mock()
+        mock_issue.key = 'ET-9012'
+        jira_client.create_issue.return_value = mock_issue
         
         # Act - Create issue with component assignment
         issue_key = jira_service.create_bug_issue(
@@ -389,9 +364,9 @@ class TestJiraIntegration:
         # Assert - Issue created
         assert issue_key == 'ET-9012'
         
-        # Extract and validate request payload
-        request_body = json.loads(responses.calls[0].request.body)
-        fields = request_body['fields']
+        # Extract fields from the call
+        call_kwargs = jira_client.create_issue.call_args.kwargs
+        fields = call_kwargs['fields']
         
         # Validate components field present
         assert 'components' in fields, "Expected components field when using component routing"
@@ -404,9 +379,9 @@ class TestJiraIntegration:
     # Test 5: add_comment with occurrence count
     # =========================================================================
     
-    @responses.activate
     def test_add_comment_with_occurrence_count(
         self,
+        jira_client: Mock,
         jira_service: JiraIntegrationService,
         sample_error_event: NormalizedErrorEvent
     ):
@@ -414,7 +389,7 @@ class TestJiraIntegration:
         Test adding comment to existing issue with formatted occurrence content.
         
         Validates:
-        - HTTP POST to /rest/api/3/issue/{key}/comment endpoint
+        - add_comment method called on JIRA client
         - Comment text format: "Error reoccurred {count}× in last 5m. Severity: {severity}. [link]"
         - Comment includes occurrence count
         - Comment includes current severity level
@@ -423,17 +398,8 @@ class TestJiraIntegration:
         
         Per Section 0.5.1 Group 5 comment format requirements.
         """
-        # Arrange - Mock Jira API add comment response
-        responses.add(
-            method=responses.POST,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/issue/ET-1234/comment',
-            json={
-                'id': '10050',
-                'body': 'Error reoccurred 15× in last 5m...',
-                'created': '2025-01-15T10:30:46.000Z'
-            },
-            status=201
-        )
+        # Arrange - Mock Jira client add_comment method
+        jira_client.add_comment.return_value = None
         
         # Act - Add comment to existing issue
         jira_service.add_comment(
@@ -444,13 +410,16 @@ class TestJiraIntegration:
             event=sample_error_event
         )
         
-        # Assert - Comment added successfully (no exception raised)
-        assert len(responses.calls) == 1, "Expected exactly one API call"
+        # Assert - add_comment was called once
+        jira_client.add_comment.assert_called_once()
         
-        # Extract and validate request payload
-        request = responses.calls[0].request
-        request_body = json.loads(request.body)
-        comment_text = request_body['body']
+        # Extract arguments from the call
+        call_args = jira_client.add_comment.call_args
+        issue_key_arg = call_args.args[0]
+        comment_text = call_args.args[1]
+        
+        # Validate issue key
+        assert issue_key_arg == 'ET-1234', "Expected correct issue key"
         
         # Validate comment format per Section 0.5.1 Group 5
         assert '15' in comment_text, "Expected occurrence count in comment"
@@ -463,63 +432,37 @@ class TestJiraIntegration:
     # Test 6: escalate_priority updates issue
     # =========================================================================
     
-    @responses.activate
-    def test_escalate_priority_updates_issue(self, jira_service: JiraIntegrationService):
+    def test_escalate_priority_updates_issue(self, jira_client: Mock, jira_service: JiraIntegrationService):
         """
         Test priority escalation when frequency threshold crossed.
         
         Validates:
-        - HTTP GET to fetch issue object
-        - HTTP PUT to /rest/api/3/issue/{key} with priority field update
+        - issue() method called to fetch issue object
+        - update() method called on issue with priority field
         - Priority field structure: {"name": "Highest"}
         - No errors raised on successful update
         
         Per Section 0.1.1 requirement #4 for threshold-based escalation.
         """
-        # Arrange - Mock Jira API responses for issue fetch and update
-        # Step 1: Fetch issue object (required by jira library)
-        responses.add(
-            method=responses.GET,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/issue/ET-1234',
-            json={
-                'key': 'ET-1234',
-                'fields': {
-                    'summary': '[prod:web-app] TypeError',
-                    'priority': {'name': 'High'}
-                }
-            },
-            status=200
-        )
-        
-        # Step 2: Update issue priority
-        responses.add(
-            method=responses.PUT,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/issue/ET-1234',
-            json={},
-            status=204
-        )
+        # Arrange - Mock Jira client issue() method
+        mock_issue = Mock()
+        mock_issue.update = Mock()
+        jira_client.issue.return_value = mock_issue
         
         # Act - Escalate priority
         jira_service.escalate_priority('ET-1234', 'Highest', event_id='vercel-xyz-123')
         
-        # Assert - Priority updated successfully (no exception raised)
-        assert len(responses.calls) == 2, "Expected two API calls (fetch + update)"
-        
-        # Validate update request payload
-        update_request = responses.calls[1].request
-        update_body = json.loads(update_request.body)
-        
-        # Verify update contains priority field with correct structure
-        assert 'fields' in update_body or 'update' in update_body or 'priority' in str(update_body), \
-            "Expected priority update in request body"
+        # Assert - Methods called correctly
+        jira_client.issue.assert_called_once_with('ET-1234')
+        mock_issue.update.assert_called_once_with(priority={"name": "Highest"})
     
     # =========================================================================
     # Test 7: Jira API retry on transient error
     # =========================================================================
     
-    @responses.activate
     def test_jira_api_retry_on_transient_error(
         self,
+        jira_client: Mock,
         jira_service: JiraIntegrationService,
         sample_error_event: NormalizedErrorEvent
     ):
@@ -528,7 +471,7 @@ class TestJiraIntegration:
         
         Validates:
         - Initial 503 Service Unavailable response triggers retry
-        - Subsequent successful 201 Created response
+        - Subsequent successful response
         - Multiple API calls made (initial + retry)
         - Final result is successful issue creation
         - Retry delays follow exponential backoff pattern (1s, 2s, 4s, 8s)
@@ -536,22 +479,18 @@ class TestJiraIntegration:
         Per Section 0.7.5, retry delays: 1s, 2s, 4s, 8s, 16s (max 5 attempts).
         Note: We don't validate timing in this test, only that retries occur.
         """
-        # Arrange - Mock Jira API with initial failure, then success
-        # First attempt: 503 Service Unavailable
-        responses.add(
-            method=responses.POST,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/issue',
-            json={'errorMessages': ['Service temporarily unavailable']},
-            status=503
-        )
+        # Arrange - Mock create_issue to fail first, then succeed
+        from jira.exceptions import JIRAError
         
-        # Second attempt: Success
-        responses.add(
-            method=responses.POST,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/issue',
-            json={'key': 'ET-9999'},
-            status=201
-        )
+        # Create a mock JIRAError with status_code attribute
+        error_503 = JIRAError(status_code=503, text='Service temporarily unavailable')
+        
+        # Create mock issue for successful response
+        mock_issue = Mock()
+        mock_issue.key = 'ET-9999'
+        
+        # Set side_effect: first call raises error, second call succeeds
+        jira_client.create_issue.side_effect = [error_503, mock_issue]
         
         # Act - Create issue (should retry after initial failure)
         issue_key = jira_service.create_bug_issue(
@@ -564,14 +503,13 @@ class TestJiraIntegration:
         
         # Assert - Eventually successful after retry
         assert issue_key == 'ET-9999', "Expected eventual success with issue key ET-9999"
-        assert len(responses.calls) == 2, "Expected two API calls (initial failure + retry success)"
+        assert jira_client.create_issue.call_count == 2, "Expected two API calls (initial failure + retry success)"
     
     # =========================================================================
     # Test 8: Jira API 429 rate limit handling
     # =========================================================================
     
-    @responses.activate
-    def test_jira_api_429_rate_limit_handling(self, jira_service: JiraIntegrationService):
+    def test_jira_api_429_rate_limit_handling(self, jira_client: Mock, jira_service: JiraIntegrationService):
         """
         Test rate limit handling with 429 response and Retry-After header.
         
@@ -583,38 +521,33 @@ class TestJiraIntegration:
         
         Per Section 0.7.5, rate limits: 100 requests/minute for Jira Cloud.
         """
-        # Arrange - Mock Jira API with rate limit response, then success
-        # First attempt: 429 Rate Limit Exceeded
-        responses.add(
-            method=responses.GET,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/search',
-            json={'errorMessages': ['Rate limit exceeded']},
-            status=429,
-            headers={'Retry-After': '60'}
-        )
+        # Arrange - Mock search_issues to fail with rate limit, then succeed
+        from jira.exceptions import JIRAError
         
-        # Second attempt: Success
-        responses.add(
-            method=responses.GET,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/search',
-            json={'issues': [{'key': 'ET-2345'}]},
-            status=200
-        )
+        # Create a mock JIRAError with status_code 429
+        error_429 = JIRAError(status_code=429, text='Rate limit exceeded')
+        
+        # Create mock search result for successful response
+        mock_issue = Mock()
+        mock_issue.key = 'ET-2345'
+        
+        # Set side_effect: first call raises 429, second call succeeds
+        jira_client.search_issues.side_effect = [error_429, [mock_issue]]
         
         # Act - Search for issue (should retry after rate limit)
         result = jira_service.search_issue_by_fingerprint(self.TEST_FINGERPRINT)
         
         # Assert - Eventually successful after retry
         assert result == 'ET-2345', "Expected eventual success after rate limit retry"
-        assert len(responses.calls) == 2, "Expected two API calls (rate limit + retry success)"
+        assert jira_client.search_issues.call_count == 2, "Expected two API calls (rate limit + retry success)"
     
     # =========================================================================
     # Test 9: Jira API 401 authentication failure (no retry)
     # =========================================================================
     
-    @responses.activate
     def test_jira_api_401_authentication_failure(
         self,
+        jira_client: Mock,
         jira_service: JiraIntegrationService,
         sample_error_event: NormalizedErrorEvent
     ):
@@ -629,16 +562,15 @@ class TestJiraIntegration:
         
         Per Section 0.7.5, permanent errors (401, 403, 404) should not retry.
         """
-        # Arrange - Mock Jira API with authentication failure
-        responses.add(
-            method=responses.POST,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/issue',
-            json={'errorMessages': ['Invalid credentials']},
-            status=401
-        )
+        # Arrange - Mock create_issue to raise 401 error
+        from jira.exceptions import JIRAError
+        
+        # Create a mock JIRAError with status_code 401
+        error_401 = JIRAError(status_code=401, text='Invalid credentials')
+        jira_client.create_issue.side_effect = error_401
         
         # Act & Assert - Expect exception raised without retry
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(JIRAError) as exc_info:
             jira_service.create_bug_issue(
                 event=sample_error_event,
                 fingerprint=self.TEST_FINGERPRINT,
@@ -648,18 +580,19 @@ class TestJiraIntegration:
             )
         
         # Verify only one API call made (no retries for permanent errors)
-        assert len(responses.calls) == 1, "Expected only one API call (no retries for 401)"
+        assert jira_client.create_issue.call_count == 1, "Expected only one API call (no retries for 401)"
         
         # Verify exception raised
         assert exc_info.value is not None, "Expected exception to be raised for 401 error"
+        assert exc_info.value.status_code == 401, "Expected 401 status code"
     
     # =========================================================================
     # Test 10: Sanitized message in issue summary
     # =========================================================================
     
-    @responses.activate
     def test_sanitized_message_in_issue_summary(
         self,
+        jira_client: Mock,
         jira_service: JiraIntegrationService
     ):
         """
@@ -690,13 +623,10 @@ class TestJiraIntegration:
             occurred_at=datetime.now()
         )
         
-        # Mock Jira API create issue response
-        responses.add(
-            method=responses.POST,
-            url=f'{self.JIRA_BASE_URL}/rest/api/3/issue',
-            json={'key': 'ET-7890'},
-            status=201
-        )
+        # Mock Jira client create_issue method
+        mock_issue = Mock()
+        mock_issue.key = 'ET-7890'
+        jira_client.create_issue.return_value = mock_issue
         
         # Act - Create issue with PII in message
         issue_key = jira_service.create_bug_issue(
@@ -710,10 +640,11 @@ class TestJiraIntegration:
         # Assert - Issue created
         assert issue_key == 'ET-7890'
         
-        # Extract request payload and validate sanitization
-        request_body = json.loads(responses.calls[0].request.body)
-        summary = request_body['fields']['summary']
-        description = request_body['fields']['description']
+        # Extract fields from the call
+        call_kwargs = jira_client.create_issue.call_args.kwargs
+        fields = call_kwargs['fields']
+        summary = fields['summary']
+        description = fields['description']
         
         # Verify PII removed from summary
         assert 'user@example.com' not in summary, "Expected email removed from summary"
