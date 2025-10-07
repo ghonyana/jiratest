@@ -421,15 +421,16 @@ jobs:
               
               const status = (failures === '0' && errors === '0') ? '✅ PASSED' : '❌ FAILED';
               
-              testResults = `## ${status} Integration Test Results
+              const successMessage = '✅ All integration tests passed successfully!';
+              const failureMessage = '⚠️ Some integration tests failed. Please review the test logs.';
+              const statusMessage = (failures === '0' && errors === '0') ? successMessage : failureMessage;
               
-- **Total Tests:** ${tests}
-- **Passed:** ${passed}
-- **Failed:** ${failures}
-- **Errors:** ${errors}
-
-${failures === '0' && errors === '0' ? '✅ All integration tests passed successfully!' : '⚠️ Some integration tests failed. Please review the test logs.'}
-              `;
+              testResults = '## ' + status + ' Integration Test Results\n\n' +
+                '* **Total Tests:** ' + tests + '\n' +
+                '* **Passed:** ' + passed + '\n' +
+                '* **Failed:** ' + failures + '\n' +
+                '* **Errors:** ' + errors + '\n\n' +
+                statusMessage;
             } catch (error) {
               testResults = '❌ Failed to read integration test results';
             }
