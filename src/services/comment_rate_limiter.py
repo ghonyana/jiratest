@@ -59,8 +59,8 @@ import time
 from typing import Optional
 from redis import Redis
 
-from utils.logging_config import get_logger
-from utils.metrics_collector import record_redis_latency
+from src.utils.logging_config import get_logger
+from src.utils.metrics_collector import record_redis_latency
 
 
 class CommentRateLimiter:
