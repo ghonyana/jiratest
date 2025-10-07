@@ -1,0 +1,460 @@
+# Integration Testing Workflow for Error Triage → Jira Upserter Service
+# Purpose: Execute comprehensive integration test suite with service containers
+# Triggers: Merge to develop (integration validation), merge to main (pre-staging verification)
+# Per Agent Action Plan Section 0.2.1 and Technical Spec Section 8.6.2
+
+name: Integration Tests
+
+# Workflow Triggers
+# Per Technical Spec 8.6.2: Trigger on merge to develop for integration validation (no deployment)
+# Per Technical Spec 8.6.2: Trigger on merge to main for pre-staging verification before deployment
+on:
+  push:
+    branches:
+      - develop  # Integration validation after merge
+      - main     # Pre-staging verification before deployment
+  workflow_dispatch:  # Manual trigger for on-demand testing
+    inputs:
+      skip_real_jira_test:
+        description: 'Skip real Jira API connectivity test'
+        required: false
+        default: 'true'
+        type: boolean
+      enable_mongo:
+        description: 'Enable MongoDB container for audit trail tests'
+        required: false
+        default: 'true'
+        type: boolean
+
+# Environment variables for all jobs
+env:
+  PYTHON_VERSION: '3.11'
+  REDIS_HOST: localhost
+  REDIS_PORT: 6379
+  MONGODB_URI: mongodb://localhost:27017
+  JIRA_BASE_URL: http://localhost:8080
+  ENABLE_MONGO: ${{ github.event.inputs.enable_mongo || 'true' }}
+  SKIP_REAL_JIRA_TEST: ${{ github.event.inputs.skip_real_jira_test || 'true' }}
+
+jobs:
+  integration-tests:
+    name: Run Integration Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Service Containers
+    # Per Agent Action Plan 0.2.1: Redis 7.2 for frequency tracking, deduplication, rate limiting
+    # Per Agent Action Plan 0.2.1: MongoDB 7.0 for audit trail and configuration history (optional)
+    services:
+      # Redis Container - Required
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      # MongoDB Container - Optional (only if ENABLE_MONGO is true)
+      mongodb:
+        image: ${{ env.ENABLE_MONGO == 'true' && 'mongo:7.0' || '' }}
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand({ping: 1})' --quiet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # Step 1: Checkout Source Code
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for potential git-based tests
+
+      # Step 2: Set up Python Environment
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'  # Cache pip dependencies for faster builds
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # Step 3: Install Dependencies
+      - name: Install Production and Development Dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          
+          # Verify critical dependencies installed
+          echo "=== Installed Package Versions ==="
+          pip show flask jira redis pymongo pytest fakeredis responses
+          echo "=================================="
+
+      # Step 4: Verify Service Container Health
+      - name: Verify Service Container Health
+        run: |
+          echo "=== Verifying Redis Container ==="
+          redis-cli -h ${{ env.REDIS_HOST }} -p ${{ env.REDIS_PORT }} ping
+          redis-cli -h ${{ env.REDIS_HOST }} -p ${{ env.REDIS_PORT }} INFO server | grep "redis_version"
+          
+          if [ "${{ env.ENABLE_MONGO }}" == "true" ]; then
+            echo "=== Verifying MongoDB Container ==="
+            mongosh ${{ env.MONGODB_URI }} --eval "db.version()" --quiet
+            mongosh ${{ env.MONGODB_URI }} --eval "db.adminCommand({ping: 1})" --quiet
+          else
+            echo "=== MongoDB Container Disabled (ENABLE_MONGO=false) ==="
+          fi
+
+      # Step 5: Start Mock Jira Service
+      # Provides minimal Jira REST API endpoints for integration tests
+      - name: Start Mock Jira Service
+        run: |
+          # Create mock Jira server script
+          cat > mock_jira_server.py << 'EOF'
+          from flask import Flask, jsonify, request
+          import logging
+          
+          app = Flask(__name__)
+          logging.basicConfig(level=logging.INFO)
+          
+          # In-memory storage for mock Jira issues
+          issues = {}
+          issue_counter = 1000
+          
+          @app.route('/rest/api/3/issue', methods=['POST'])
+          def create_issue():
+              global issue_counter
+              data = request.get_json()
+              issue_key = f"ET-{issue_counter}"
+              issue_counter += 1
+              
+              issues[issue_key] = {
+                  'key': issue_key,
+                  'id': str(issue_counter),
+                  'self': f'http://localhost:8080/rest/api/3/issue/{issue_key}',
+                  'fields': data.get('fields', {})
+              }
+              
+              app.logger.info(f"Created issue {issue_key}")
+              return jsonify({'key': issue_key, 'id': str(issue_counter), 'self': issues[issue_key]['self']}), 201
+          
+          @app.route('/rest/api/3/search', methods=['GET'])
+          def search_issues():
+              jql = request.args.get('jql', '')
+              app.logger.info(f"Search JQL: {jql}")
+              
+              # Simple label-based search for fingerprint
+              if 'errfp:' in jql:
+                  fingerprint = jql.split('errfp:')[1].split('"')[0]
+                  matching = [issue for key, issue in issues.items() 
+                             if any(f'errfp:{fingerprint}' in label 
+                                   for label in issue['fields'].get('labels', []))]
+                  return jsonify({'issues': matching, 'total': len(matching)}), 200
+              
+              return jsonify({'issues': [], 'total': 0}), 200
+          
+          @app.route('/rest/api/3/issue/<issue_key>/comment', methods=['POST'])
+          def add_comment(issue_key):
+              if issue_key not in issues:
+                  return jsonify({'error': 'Issue not found'}), 404
+              
+              data = request.get_json()
+              app.logger.info(f"Added comment to {issue_key}: {data.get('body', '')[:100]}")
+              return jsonify({'id': '10050', 'self': f'http://localhost:8080/rest/api/3/issue/{issue_key}/comment/10050'}), 201
+          
+          @app.route('/rest/api/3/issue/<issue_key>', methods=['PUT'])
+          def update_issue(issue_key):
+              if issue_key not in issues:
+                  return jsonify({'error': 'Issue not found'}), 404
+              
+              data = request.get_json()
+              issues[issue_key]['fields'].update(data.get('fields', {}))
+              app.logger.info(f"Updated issue {issue_key}")
+              return jsonify({'success': True}), 204
+          
+          @app.route('/rest/api/3/serverInfo', methods=['GET'])
+          def server_info():
+              return jsonify({'version': '1000.0.0-SNAPSHOT', 'baseUrl': 'http://localhost:8080'}), 200
+          
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=8080)
+          EOF
+          
+          # Start mock Jira server in background
+          python mock_jira_server.py > mock_jira.log 2>&1 &
+          MOCK_JIRA_PID=$!
+          echo "Mock Jira server started with PID $MOCK_JIRA_PID"
+          echo "MOCK_JIRA_PID=$MOCK_JIRA_PID" >> $GITHUB_ENV
+          
+          # Wait for server to be ready
+          for i in {1..30}; do
+            if curl -f -s http://localhost:8080/rest/api/3/serverInfo > /dev/null; then
+              echo "✓ Mock Jira server is ready"
+              break
+            fi
+            echo "Waiting for mock Jira server (attempt $i/30)..."
+            sleep 2
+          done
+          
+          # Verify server is responding
+          curl -f http://localhost:8080/rest/api/3/serverInfo
+
+      # Step 6: Set Test Environment Variables
+      - name: Configure Test Environment
+        run: |
+          # Create .env file for tests
+          cat > .env.test << EOF
+          REDIS_HOST=${{ env.REDIS_HOST }}
+          REDIS_PORT=${{ env.REDIS_PORT }}
+          MONGODB_URI=${{ env.MONGODB_URI }}
+          JIRA_BASE_URL=${{ env.JIRA_BASE_URL }}
+          JIRA_API_TOKEN=mock-api-token-for-testing
+          JIRA_PROJECT_KEY=ET
+          VERCEL_WEBHOOK_SECRET=test-vercel-secret-12345
+          GCP_AUDIENCE=https://error-triage.jiratest.com
+          ENABLE_MONGO=${{ env.ENABLE_MONGO }}
+          EOF
+          
+          echo "=== Test Environment Configuration ==="
+          cat .env.test
+          echo "======================================"
+
+      # Step 7: Run Integration Tests
+      # Per Agent Action Plan 0.2.1: Execute all integration tests covering:
+      # - test_events_endpoint.py: End-to-end webhook processing
+      # - test_jira_integration.py: Jira operations (create, search, comment, escalate)
+      # - test_deduplication.py: Event ID deduplication with TTL expiry
+      # - test_health_checks.py: Dependency connectivity validation
+      # - test_rate_limiting.py: Comment frequency enforcement
+      - name: Execute Integration Test Suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}
+        run: |
+          echo "=== Running Integration Tests ==="
+          pytest tests/integration/ \
+            --verbose \
+            --tb=short \
+            --color=yes \
+            --junitxml=integration-results.xml \
+            --cov=src \
+            --cov-report=xml:integration-coverage.xml \
+            --cov-report=term-missing \
+            -v
+          
+          echo "=== Integration Test Execution Complete ==="
+
+      # Step 8: Test Validation Checks
+      # Verify integration test results and service operations
+      - name: Validate Integration Test Results
+        if: always()  # Run even if previous step fails to gather diagnostics
+        run: |
+          echo "=== Validating Test Results ==="
+          
+          # Check if JUnit XML was generated
+          if [ -f integration-results.xml ]; then
+            echo "✓ Integration test results file generated"
+            
+            # Parse test statistics (requires xmllint)
+            TESTS=$(xmllint --xpath "string(//testsuite/@tests)" integration-results.xml 2>/dev/null || echo "0")
+            FAILURES=$(xmllint --xpath "string(//testsuite/@failures)" integration-results.xml 2>/dev/null || echo "0")
+            ERRORS=$(xmllint --xpath "string(//testsuite/@errors)" integration-results.xml 2>/dev/null || echo "0")
+            
+            echo "Tests executed: $TESTS"
+            echo "Failures: $FAILURES"
+            echo "Errors: $ERRORS"
+            
+            if [ "$FAILURES" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
+              echo "✗ Integration tests have failures or errors"
+              exit 1
+            else
+              echo "✓ All integration tests passed"
+            fi
+          else
+            echo "✗ Integration test results file not found"
+            exit 1
+          fi
+          
+          # Verify Redis operations (check if frequency counters work)
+          echo "=== Verifying Redis Operations ==="
+          REDIS_KEYS=$(redis-cli -h ${{ env.REDIS_HOST }} -p ${{ env.REDIS_PORT }} KEYS "freq:*" | wc -l)
+          echo "Frequency counter keys found: $REDIS_KEYS"
+          
+          DEDUP_KEYS=$(redis-cli -h ${{ env.REDIS_HOST }} -p ${{ env.REDIS_PORT }} KEYS "dedup:*" | wc -l)
+          echo "Deduplication keys found: $DEDUP_KEYS"
+          
+          if [ "$REDIS_KEYS" -gt 0 ] || [ "$DEDUP_KEYS" -gt 0 ]; then
+            echo "✓ Redis operations validated (keys created during tests)"
+          else
+            echo "⚠ No Redis keys found (tests may not have exercised Redis operations)"
+          fi
+          
+          # Verify MongoDB operations (if enabled)
+          if [ "${{ env.ENABLE_MONGO }}" == "true" ]; then
+            echo "=== Verifying MongoDB Operations ==="
+            
+            # Check if test database was created
+            DBS=$(mongosh ${{ env.MONGODB_URI }} --eval "db.adminCommand('listDatabases').databases" --quiet)
+            echo "MongoDB databases: $DBS"
+            
+            # Check if error_events collection exists (created during tests)
+            COLLECTIONS=$(mongosh ${{ env.MONGODB_URI }}/jiratest-test --eval "db.getCollectionNames()" --quiet)
+            echo "Test collections: $COLLECTIONS"
+            
+            if echo "$COLLECTIONS" | grep -q "error_events\|jira_actions"; then
+              echo "✓ MongoDB audit trail collections created"
+            else
+              echo "⚠ MongoDB audit collections not found (may not be required for integration tests)"
+            fi
+          fi
+          
+          echo "=== Validation Complete ==="
+
+      # Step 9: Jira Connectivity Verification (Optional)
+      # Test real Jira Cloud API connectivity (only in staging/production environments)
+      - name: Verify Real Jira API Connectivity
+        if: env.SKIP_REAL_JIRA_TEST != 'true' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        env:
+          REAL_JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL_STAGING }}
+          REAL_JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN_STAGING }}
+        run: |
+          echo "=== Testing Real Jira API Connectivity ==="
+          
+          # Execute read-only JQL query to verify authentication and project access
+          RESPONSE=$(curl -s -w "\n%{http_code}" -u "api@jiratest.com:$REAL_JIRA_API_TOKEN" \
+            -H "Accept: application/json" \
+            "$REAL_JIRA_BASE_URL/rest/api/3/search?jql=project=ET&maxResults=1")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            echo "✓ Jira API authentication successful"
+            echo "Query response: $BODY"
+          else
+            echo "✗ Jira API authentication failed (HTTP $HTTP_CODE)"
+            echo "Response: $BODY"
+            exit 1
+          fi
+          
+          echo "=== Jira Connectivity Verified ==="
+
+      # Step 10: Test Data Cleanup
+      # Per Agent Action Plan 0.2.1: Clean up test data after execution
+      - name: Clean Up Test Data
+        if: always()  # Always clean up, even if tests fail
+        run: |
+          echo "=== Cleaning Up Test Data ==="
+          
+          # Flush Redis test keys
+          echo "Flushing Redis test database..."
+          redis-cli -h ${{ env.REDIS_HOST }} -p ${{ env.REDIS_PORT }} FLUSHDB
+          echo "✓ Redis test keys flushed"
+          
+          # Truncate MongoDB test collections (if enabled)
+          if [ "${{ env.ENABLE_MONGO }}" == "true" ]; then
+            echo "Truncating MongoDB test collections..."
+            mongosh ${{ env.MONGODB_URI }}/jiratest-test --eval "db.error_events.deleteMany({})" --quiet
+            mongosh ${{ env.MONGODB_URI }}/jiratest-test --eval "db.jira_actions.deleteMany({})" --quiet
+            mongosh ${{ env.MONGODB_URI }}/jiratest-test --eval "db.configuration_history.deleteMany({})" --quiet
+            echo "✓ MongoDB test collections truncated"
+          fi
+          
+          # Stop mock Jira server
+          if [ -n "$MOCK_JIRA_PID" ]; then
+            echo "Stopping mock Jira server (PID $MOCK_JIRA_PID)..."
+            kill $MOCK_JIRA_PID 2>/dev/null || true
+            echo "✓ Mock Jira server stopped"
+          fi
+          
+          echo "=== Cleanup Complete ==="
+
+      # Step 11: Upload Test Artifacts
+      # Per Agent Action Plan 0.2.1: Upload test results and logs for debugging
+      - name: Upload Integration Test Results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: integration-test-results
+          path: |
+            integration-results.xml
+            integration-coverage.xml
+            mock_jira.log
+          retention-days: 30
+
+      # Step 12: Upload Service Container Logs (on failure)
+      - name: Upload Service Container Logs
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: service-container-logs
+          path: |
+            mock_jira.log
+          retention-days: 30
+
+      # Step 13: Comment on PR with Test Results (if applicable)
+      - name: Comment Test Results on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            
+            // Read JUnit XML results
+            let testResults = 'Integration test results not available';
+            try {
+              const xml = fs.readFileSync('integration-results.xml', 'utf8');
+              const testsMatch = xml.match(/tests="(\d+)"/);
+              const failuresMatch = xml.match(/failures="(\d+)"/);
+              const errorsMatch = xml.match(/errors="(\d+)"/);
+              
+              const tests = testsMatch ? testsMatch[1] : '0';
+              const failures = failuresMatch ? failuresMatch[1] : '0';
+              const errors = errorsMatch ? errorsMatch[1] : '0';
+              const passed = tests - failures - errors;
+              
+              const status = (failures === '0' && errors === '0') ? '✅ PASSED' : '❌ FAILED';
+              
+              testResults = `## ${status} Integration Test Results
+              
+- **Total Tests:** ${tests}
+- **Passed:** ${passed}
+- **Failed:** ${failures}
+- **Errors:** ${errors}
+
+${failures === '0' && errors === '0' ? '✅ All integration tests passed successfully!' : '⚠️ Some integration tests failed. Please review the test logs.'}
+              `;
+            } catch (error) {
+              testResults = '❌ Failed to read integration test results';
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: testResults
+            });
+
+  # Job 2: Integration Test Summary
+  # Provides a single status check for branch protection rules
+  integration-test-summary:
+    name: Integration Test Summary
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    if: always()
+    steps:
+      - name: Check Integration Test Status
+        run: |
+          if [ "${{ needs.integration-tests.result }}" == "success" ]; then
+            echo "✅ All integration tests passed"
+            exit 0
+          else
+            echo "❌ Integration tests failed or were cancelled"
+            exit 1
+          fi
