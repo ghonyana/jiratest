@@ -72,7 +72,41 @@ from unittest.mock import Mock, MagicMock, patch
 import pytest
 from fakeredis import FakeRedis
 
+
+# =============================================================================
+# Pre-Import AWS Secrets Manager Mocking
+# =============================================================================
+# CRITICAL: Mock AWS Secrets Manager BEFORE importing any application modules
+# that attempt to load secrets at import time (src.app.config loads secrets
+# in __init_subclass__ metaclass method). This prevents boto3 from attempting
+# to locate AWS credentials during test discovery and import.
+
+# Define mock secret values for testing
+_mock_jira_credentials = {
+    'base_url': 'https://test.atlassian.net',
+    'email': 'test@example.com',
+    'api_token': 'test_api_token_12345'
+}
+
+_mock_webhook_secret = 'test_webhook_secret_abcdef123456'
+
+# Patch secrets_manager functions at module level
+# This ensures all imports after this point see mocked functions
+_secrets_patcher_json = patch(
+    'src.utils.secrets_manager.get_json_secret',
+    return_value=_mock_jira_credentials
+)
+_secrets_patcher_plain = patch(
+    'src.utils.secrets_manager.get_secret',
+    return_value=_mock_webhook_secret
+)
+
+# Start the patches before any application imports
+_secrets_patcher_json.start()
+_secrets_patcher_plain.start()
+
 # Internal imports - Application factory and configuration
+# NOW safe to import because AWS Secrets Manager is mocked
 from src.app import create_app
 from src.app.config import Config
 
@@ -159,6 +193,23 @@ def pytest_sessionstart(session):
     os.environ['ENABLE_MONGO'] = 'false'
     os.environ['JIRA_BASE_URL'] = 'https://test.atlassian.net'
     os.environ['PROJECT_KEY'] = 'ET'
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """
+    Pytest hook called at the end of the test session.
+    
+    Performs session-level cleanup after all tests have completed.
+    This includes stopping module-level patches that were started
+    before application imports to mock AWS Secrets Manager.
+    
+    Args:
+        session: Pytest session object
+        exitstatus: Exit status that will be returned to the OS
+    """
+    # Stop module-level AWS Secrets Manager patches
+    _secrets_patcher_json.stop()
+    _secrets_patcher_plain.stop()
 
 
 # =============================================================================
@@ -802,4 +853,5 @@ __all__ = [
     'app',
     'pytest_configure',
     'pytest_sessionstart',
+    'pytest_sessionfinish',
 ]
