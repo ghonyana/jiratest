@@ -23,10 +23,10 @@ exclude =
     *.egg
 
 # Error codes to ignore (primarily for Black compatibility)
-ignore =
-    E203,  # Whitespace before ':' - conflicts with Black's formatting
-    W503,  # Line break before binary operator - conflicts with Black
-    E501   # Line too long - handled by Black formatter
+# E203: Whitespace before ':' - conflicts with Black's formatting
+# W503: Line break before binary operator - conflicts with Black
+# E501: Line too long - handled by Black formatter
+ignore = E203,W503,E501
 
 # Per-file ignores - allow specific violations in certain file types
 per-file-ignores =
