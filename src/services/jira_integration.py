@@ -86,10 +86,10 @@ from jira import JIRA
 from jira.exceptions import JIRAError
 
 # Internal imports (from depends_on_files only)
-from models.error_event import NormalizedErrorEvent
-from services.sanitizer import PIISanitizer
-from utils.logging_config import get_logger
-from utils.metrics_collector import record_jira_api_latency
+from src.models.error_event import NormalizedErrorEvent
+from src.services.sanitizer import PIISanitizer
+from src.utils.logging_config import get_logger
+from src.utils.metrics_collector import record_jira_api_latency
 
 # Initialize module logger
 logger = get_logger(__name__)
