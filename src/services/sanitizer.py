@@ -169,6 +169,43 @@ class PIISanitizer:
 
         return sanitized
 
+    def _compile_patterns(self, patterns_config: list) -> Tuple[List[Tuple[Pattern, str]], List[Tuple[str, str]]]:
+        """
+        Compile regex patterns from configuration list.
+
+        Args:
+            patterns_config: List of pattern dictionaries from YAML configuration
+
+        Returns:
+            Tuple of (compiled_patterns, raw_patterns) lists
+
+        Raises:
+            ValueError: If pattern structure is invalid or regex compilation fails
+        """
+        compiled_patterns: List[Tuple[Pattern, str]] = []
+        raw_patterns: List[Tuple[str, str]] = []
+
+        for idx, pattern_obj in enumerate(patterns_config):
+            if not isinstance(pattern_obj, dict):
+                raise ValueError(f"Pattern at index {idx} is not a dictionary")
+
+            if "pattern" not in pattern_obj or "replacement" not in pattern_obj:
+                raise ValueError(f"Pattern at index {idx} missing 'pattern' or 'replacement' key")
+
+            pattern_str = pattern_obj["pattern"]
+            replacement_str = pattern_obj["replacement"]
+
+            try:
+                # Compile regex pattern with IGNORECASE flag for email matching
+                compiled_pattern = re.compile(pattern_str, re.IGNORECASE)
+                compiled_patterns.append((compiled_pattern, replacement_str))
+                raw_patterns.append((pattern_str, replacement_str))
+
+            except re.error as e:
+                raise ValueError(f"Invalid regex pattern at index {idx}: '{pattern_str}' - {str(e)}")
+
+        return compiled_patterns, raw_patterns
+
     def load_patterns(self, yaml_path: str) -> List[Tuple[str, str]]:
         """
         Load and compile PII detection regex patterns from YAML configuration file.
@@ -235,32 +272,8 @@ class PIISanitizer:
             if not isinstance(patterns_config, list):
                 raise ValueError("'patterns' must be a list of pattern objects")
 
-            # Compile all patterns and cache them
-            compiled_patterns: List[Tuple[Pattern, str]] = []
-            raw_patterns: List[Tuple[str, str]] = []
-
-            for idx, pattern_obj in enumerate(patterns_config):
-                if not isinstance(pattern_obj, dict):
-                    raise ValueError(f"Pattern at index {idx} is not a dictionary")
-
-                if "pattern" not in pattern_obj or "replacement" not in pattern_obj:
-                    raise ValueError(
-                        f"Pattern at index {idx} missing 'pattern' or 'replacement' key"
-                    )
-
-                pattern_str = pattern_obj["pattern"]
-                replacement_str = pattern_obj["replacement"]
-
-                try:
-                    # Compile regex pattern with IGNORECASE flag for email matching
-                    compiled_pattern = re.compile(pattern_str, re.IGNORECASE)
-                    compiled_patterns.append((compiled_pattern, replacement_str))
-                    raw_patterns.append((pattern_str, replacement_str))
-
-                except re.error as e:
-                    raise ValueError(
-                        f"Invalid regex pattern at index {idx}: '{pattern_str}' - {str(e)}"
-                    )
+            # Compile all patterns using helper method
+            compiled_patterns, raw_patterns = self._compile_patterns(patterns_config)
 
             # Update instance state atomically
             self._patterns = compiled_patterns
