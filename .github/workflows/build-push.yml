@@ -1,0 +1,333 @@
+name: Build and Push Docker Image
+
+# Workflow triggers per Technical Spec Section 8.6.2:
+# - Automatic build on merge to main (staging deployment)
+# - Automatic build on release tags (production deployment)
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'  # Semantic version tags (e.g., v1.0.0, v1.2.3)
+  workflow_dispatch:  # Allow manual triggering for debugging
+
+# Environment variables used across jobs
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: jiratest/error-triage
+  PLATFORMS: linux/amd64,linux/arm64  # Multi-architecture build targets
+
+# Permissions required for OIDC authentication and GitHub Security tab integration
+permissions:
+  id-token: write  # Required for AWS OIDC authentication
+  contents: read   # Required to checkout repository
+  security-events: write  # Required to upload SARIF reports to GitHub Security tab
+
+jobs:
+  build-and-push:
+    name: Build Multi-Arch Image and Push to ECR
+    runs-on: ubuntu-latest
+    
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      image_digest: ${{ steps.build.outputs.digest }}
+      vulnerability_count: ${{ steps.scan.outputs.vulnerability_count }}
+    
+    steps:
+      # Step 1: Checkout repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for accurate versioning
+      
+      # Step 2: Configure AWS credentials using OIDC (GitHub Actions to AWS IAM role trust)
+      # Assumes IAM role with ECR push permissions exists
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}  # GitHub secret containing IAM role ARN
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-BuildPush-${{ github.run_id }}
+      
+      # Step 3: Login to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: true  # Prevent password leakage in logs
+      
+      # Step 4: Set up QEMU for cross-platform emulation (required for arm64 builds on amd64 runners)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64  # Enable ARM64 emulation
+      
+      # Step 5: Set up Docker Buildx for multi-platform builds
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+          buildkitd-flags: --debug
+      
+      # Step 6: Extract metadata for Docker image tagging
+      # Implements tagging strategy from Technical Spec Section 8.6.4
+      - name: Extract Docker metadata and generate tags
+        id: meta
+        run: |
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          REPO="${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}"
+          
+          # Extract commit SHA (first 8 characters for brevity)
+          COMMIT_SHA_SHORT="${GITHUB_SHA:0:8}"
+          
+          # Determine environment and semantic version based on trigger
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # Release tag workflow (e.g., refs/tags/v1.2.3)
+            SEMANTIC_VERSION="${GITHUB_REF#refs/tags/}"
+            ENVIRONMENT="prod"
+            BRANCH_TAG=""  # No branch tag for release builds
+          else
+            # Push to main branch
+            SEMANTIC_VERSION=""
+            ENVIRONMENT="staging"
+            BRANCH_TAG="main"
+          fi
+          
+          # Build tag list per Technical Spec Section 8.6.4:
+          # 1. Commit SHA tag (immutable, primary identifier)
+          TAGS="${REPO}:${COMMIT_SHA_SHORT}"
+          
+          # 2. Branch tag (mutable, only for branch builds)
+          if [[ -n "$BRANCH_TAG" ]]; then
+            TAGS="${TAGS},${REPO}:${BRANCH_TAG}"
+          fi
+          
+          # 3. Semantic version tag (immutable, only for release tags)
+          if [[ -n "$SEMANTIC_VERSION" ]]; then
+            TAGS="${TAGS},${REPO}:${SEMANTIC_VERSION}"
+          fi
+          
+          # 4. Environment latest tag (mutable)
+          TAGS="${TAGS},${REPO}:${ENVIRONMENT}-latest"
+          
+          # Export for use in subsequent steps
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          echo "image_tag=${COMMIT_SHA_SHORT}" >> $GITHUB_OUTPUT
+          echo "semantic_version=${SEMANTIC_VERSION}" >> $GITHUB_OUTPUT
+          echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+          
+          # Display tags for debugging
+          echo "Generated Docker tags:"
+          echo "$TAGS" | tr ',' '\n'
+      
+      # Step 7: Build Docker image for multiple architectures
+      # Multi-stage build from Dockerfile in repository root
+      - name: Build Docker image (multi-arch)
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: false  # Don't push yet, scan first
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VERSION=${{ steps.meta.outputs.semantic_version || steps.meta.outputs.image_tag }}
+          cache-from: type=gha  # Use GitHub Actions cache
+          cache-to: type=gha,mode=max
+          load: true  # Load image into Docker for Trivy scanning
+          outputs: type=docker  # Output to Docker daemon for local scanning
+      
+      # Step 8: Run Trivy vulnerability scanner
+      # Per Technical Spec Section 8.6.5: Block deployment if CRITICAL/HIGH vulnerabilities found
+      - name: Run Trivy vulnerability scanner
+        id: scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.image_tag }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'  # Fail the workflow if vulnerabilities found
+          vuln-type: 'os,library'  # Scan OS packages and application dependencies
+          scanners: 'vuln,secret,config'  # Scan for vulnerabilities, secrets, and misconfigurations
+      
+      # Step 9: Generate additional Trivy report in JSON format for artifact upload
+      - name: Generate Trivy JSON report
+        if: always()  # Run even if previous step fails
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.image_tag }}
+          format: 'json'
+          output: 'trivy-results.json'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+          exit-code: '0'  # Don't fail, just generate report
+      
+      # Step 10: Extract vulnerability count from Trivy JSON report
+      - name: Extract vulnerability metrics
+        id: vuln-metrics
+        if: always()
+        run: |
+          if [[ -f trivy-results.json ]]; then
+            CRITICAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)
+            HIGH_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json)
+            TOTAL_VULNS=$((CRITICAL_COUNT + HIGH_COUNT))
+            echo "vulnerability_count=${TOTAL_VULNS}" >> $GITHUB_OUTPUT
+            echo "critical_count=${CRITICAL_COUNT}" >> $GITHUB_OUTPUT
+            echo "high_count=${HIGH_COUNT}" >> $GITHUB_OUTPUT
+            
+            echo "Vulnerability Summary:"
+            echo "  CRITICAL: ${CRITICAL_COUNT}"
+            echo "  HIGH: ${HIGH_COUNT}"
+            echo "  TOTAL (CRITICAL+HIGH): ${TOTAL_VULNS}"
+          else
+            echo "vulnerability_count=0" >> $GITHUB_OUTPUT
+            echo "Trivy results file not found"
+          fi
+      
+      # Step 11: Upload Trivy SARIF report to GitHub Security tab
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()  # Upload even if scan found vulnerabilities
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'trivy-container-scan'
+      
+      # Step 12: Upload Trivy JSON report as workflow artifact
+      - name: Upload Trivy JSON report artifact
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: trivy-vulnerability-report
+          path: trivy-results.json
+          retention-days: 90  # Per Technical Spec Section 8.6.4
+      
+      # Step 13: Conditionally push to ECR only if Trivy scan passed
+      # This step only runs if previous Trivy scan (step 8) succeeded
+      - name: Push Docker image to ECR
+        id: push
+        if: success()  # Only push if all previous steps succeeded (no vulnerabilities)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: true  # Push to ECR
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VERSION=${{ steps.meta.outputs.semantic_version || steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false  # Disable provenance attestation for compatibility
+      
+      # Step 14: Generate build metadata artifact
+      - name: Generate build metadata
+        if: success()
+        run: |
+          cat > build-metadata.json <<EOF
+          {
+            "image_tag": "${{ steps.meta.outputs.image_tag }}",
+            "image_digest": "${{ steps.push.outputs.digest }}",
+            "commit_sha": "${{ github.sha }}",
+            "semantic_version": "${{ steps.meta.outputs.semantic_version }}",
+            "environment": "${{ steps.meta.outputs.environment }}",
+            "build_date": "${{ github.event.head_commit.timestamp }}",
+            "platforms": "${{ env.PLATFORMS }}",
+            "ecr_repository": "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}",
+            "vulnerability_count": "${{ steps.vuln-metrics.outputs.vulnerability_count }}",
+            "workflow_run_id": "${{ github.run_id }}",
+            "workflow_run_number": "${{ github.run_number }}"
+          }
+          EOF
+          
+          echo "Build metadata generated:"
+          cat build-metadata.json
+      
+      # Step 15: Upload build metadata artifact
+      - name: Upload build metadata artifact
+        if: success()
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-metadata
+          path: build-metadata.json
+          retention-days: 90
+      
+      # Step 16: Create GitHub issue for security vulnerabilities (if scan failed)
+      - name: Create security review issue
+        if: failure() && steps.scan.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const criticalCount = '${{ steps.vuln-metrics.outputs.critical_count }}';
+            const highCount = '${{ steps.vuln-metrics.outputs.high_count }}';
+            const imageTag = '${{ steps.meta.outputs.image_tag }}';
+            const commitSha = '${{ github.sha }}';
+            
+            const issueBody = `## Security Vulnerability Detected in Docker Image
+            
+            **Image Tag:** \`${imageTag}\`  
+            **Commit SHA:** \`${commitSha}\`  
+            **Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ### Vulnerability Summary
+            - **CRITICAL:** ${criticalCount}
+            - **HIGH:** ${highCount}
+            
+            ### Action Required
+            Per Technical Spec Section 8.6.5, deployment is **BLOCKED** until vulnerabilities are resolved.
+            
+            ### Remediation Steps
+            1. Review Trivy scan results in the [Security tab](${{ github.server_url }}/${{ github.repository }}/security/code-scanning)
+            2. Update vulnerable dependencies in \`requirements.txt\`
+            3. Test fixes locally: \`docker build -t test . && trivy image test\`
+            4. Push fix to trigger re-scan
+            
+            ### Related Artifacts
+            - [Trivy JSON Report](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - [SARIF Report](${{ github.server_url }}/${{ github.repository }}/security/code-scanning)
+            
+            **This issue will be automatically closed when the vulnerability scan passes.**
+            `;
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[SECURITY] Vulnerabilities detected in image ${imageTag}`,
+              body: issueBody,
+              labels: ['security', 'blocked-deployment', 'trivy-scan']
+            });
+      
+      # Step 17: Summary output for workflow run
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## Docker Build and Push Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** \`${{ steps.meta.outputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ steps.meta.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** ${{ env.PLATFORMS }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ steps.scan.outcome }}" == "failure" ]]; then
+            echo "### ❌ Security Scan Failed" >> $GITHUB_STEP_SUMMARY
+            echo "**CRITICAL vulnerabilities:** ${{ steps.vuln-metrics.outputs.critical_count }}" >> $GITHUB_STEP_SUMMARY
+            echo "**HIGH vulnerabilities:** ${{ steps.vuln-metrics.outputs.high_count }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Deployment BLOCKED per Technical Spec Section 8.6.5**" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ steps.push.outcome }}" == "success" ]]; then
+            echo "### ✅ Image Successfully Built and Pushed" >> $GITHUB_STEP_SUMMARY
+            echo "**ECR Repository:** \`${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "**Image Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "${{ steps.meta.outputs.tags }}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
