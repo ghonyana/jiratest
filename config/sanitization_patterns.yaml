@@ -1,0 +1,140 @@
+# Sanitization Patterns Configuration
+#
+# This file defines regex patterns for detecting and removing PII (Personally
+# Identifiable Information) from error messages and stack traces before
+# fingerprint generation and Jira transmission.
+#
+# Per Section 0.7.4 Security Patterns:
+# - Sanitization occurs in two places:
+#   1. Before fingerprint generation (ensures grouping stability)
+#   2. Before sending to Jira (ensures no PII in tickets)
+#
+# Each pattern consists of:
+#   - pattern: Regular expression to match PII
+#   - replacement: Placeholder token to replace matches with
+#
+# Patterns are applied sequentially in the order defined below.
+# All regex patterns are compiled with re.IGNORECASE flag.
+
+patterns:
+  # Email Addresses
+  # Matches: user@example.com, admin.user@subdomain.company.co.uk
+  # Result: [EMAIL]
+  - pattern: '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    replacement: '[EMAIL]'
+
+  # UUID (Universally Unique Identifiers)
+  # Matches: 550e8400-e29b-41d4-a716-446655440000, 123e4567-e89b-12d3-a456-426614174000
+  # Result: [UUID]
+  - pattern: '\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'
+    replacement: '[UUID]'
+
+  # AWS Account IDs (12-digit numbers) - MUST BE BEFORE generic phone pattern
+  # Matches: account: 123456789012
+  # Result: account: [AWS_ACCOUNT]
+  - pattern: '\b(account|accountId|account_id)[:=]?\s*\d{12}\b'
+    replacement: '\1=[AWS_ACCOUNT]'
+
+  # Generic hexadecimal strings (potential tokens/secrets) - MUST BE BEFORE phone pattern
+  # Matches: 0x1234567890abcdef, hex:abcdef123456
+  # Result: 0x[HEX], hex:[HEX]
+  # Note: Only matches long hex strings (16+ chars) to avoid false positives
+  - pattern: '\b(0x|hex:)[0-9a-f]{16,}\b'
+    replacement: '\1[HEX]'
+
+  # Credit Card Numbers (various formats) - MUST BE BEFORE phone pattern
+  # Matches: 4532-1234-5678-9010, 4532123456789010, 4532 1234 5678 9010
+  # Result: [CARD]
+  - pattern: '\b(?:\d{4}[-\s]?){3}\d{4}\b'
+    replacement: '[CARD]'
+
+  # Phone Numbers (various formats) - After more specific numeric patterns
+  # Matches: (555) 123-4567, 555-123-4567, +1-555-123-4567, 5551234567
+  # Result: [PHONE]
+  - pattern: '(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+    replacement: '[PHONE]'
+
+  # Numeric IDs in common formats (with key names)
+  # Matches: user_id=12345, userId:67890, id=999, customerId:456789
+  # Result: user_id=[ID], userId=[ID], id=[ID], customerId=[ID]
+  # Note: Uses backreference \1 to preserve the key name
+  - pattern: '\b(user_id|userId|id|customer_id|customerId|order_id|orderId|account_id|accountId)[:=]\s*\d+'
+    replacement: '\1=[ID]'
+
+  # Generic Numeric IDs (standalone sequences of 6+ digits)
+  # Matches: 123456, 9876543210, 100000000
+  # Result: [NUMERIC_ID]
+  # Note: Matches 6+ digit sequences to avoid false positives on years, small numbers, etc.
+  # Applied after specific ID patterns to preserve context when available
+  - pattern: '\b\d{6,}\b'
+    replacement: '[NUMERIC_ID]'
+
+  # JWT Tokens (JSON Web Tokens with three Base64 segments)
+  # Matches: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U
+  # Result: [JWT]
+  # Note: Must be before generic base64 pattern to avoid false positives
+  - pattern: '\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'
+    replacement: '[JWT]'
+
+  # Authentication Tokens (Bearer tokens)
+  # Matches: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9, Bearer abc123xyz, Authorization: Bearer token123
+  # Result: Bearer [TOKEN], Authorization: Bearer [TOKEN]
+  - pattern: 'Bearer\s+[A-Za-z0-9\-_.=]+'
+    replacement: 'Bearer [TOKEN]'
+
+  # Base64 Encoded Tokens (generic Base64 strings 20+ characters)
+  # Matches: base64:dGhpcyBpcyBhIHNlY3JldCB0b2tlbiB0aGF0IGlzIGxvbmc=, token=YWJjZGVmZ2hpamtsbW5vcHFyc3Q=
+  # Result: base64:[BASE64], token=[BASE64]
+  # Note: Only matches strings 20+ chars to avoid false positives on short encoded values
+  - pattern: '\b([A-Za-z0-9+/]{20,}={0,2})\b'
+    replacement: '[BASE64]'
+
+  # API Keys and Secret Tokens (with common prefixes)
+  # Matches: api_key=sk_live_abc123, token=ghp_1234567890abcdef, secret=pk_test_xyz789
+  # Result: api_key=[TOKEN], token=[TOKEN], secret=[TOKEN]
+  - pattern: '\b(api_key|apiKey|apikey|token|secret|password|accessToken|access_token)[:=]\s*[A-Za-z0-9\-_.=]+'
+    replacement: '\1=[TOKEN]'
+
+  # Social Security Numbers (US format)
+  # Matches: 123-45-6789, 123456789
+  # Result: [SSN]
+  - pattern: '\b\d{3}-?\d{2}-?\d{4}\b'
+    replacement: '[SSN]'
+
+  # IP Addresses (IPv4)
+  # Matches: 192.168.1.1, 10.0.0.255
+  # Result: [IP]
+  - pattern: '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    replacement: '[IP]'
+
+  # Session IDs and tracking IDs (common patterns)
+  # Matches: sessionId=abc123def456, trackingId:xyz789
+  # Result: sessionId=[ID], trackingId=[ID]
+  - pattern: '\b(sessionId|session_id|trackingId|tracking_id|requestId|request_id)[:=]\s*[A-Za-z0-9]+'
+    replacement: '\1=[ID]'
+
+  # Database Connection Strings (partial sanitization - passwords)
+  # Matches: mongodb://user:password@host:port, postgres://user:pass@localhost
+  # Result: mongodb://user:[REDACTED]@host:port
+  - pattern: '((?:mongodb|postgres|mysql|redis)://[^:]+:)[^@]+(@)'
+    replacement: '\1[REDACTED]\2'
+
+  # URLs with query parameters containing tokens or IDs
+  # Matches: ?token=abc123&key=xyz789
+  # Result: ?token=[REDACTED]&key=[REDACTED]
+  - pattern: '([?&](?:token|key|apiKey|api_key|secret|password|auth)=)[^&\s]+'
+    replacement: '\1[REDACTED]'
+
+  # Timestamps with microsecond precision (can reveal timing attacks)
+  # Matches: 2025-01-15T10:30:45.123456Z
+  # Result: 2025-01-15T10:30:45.[MICRO]Z
+  # Note: Preserves date/time for debugging, only sanitizes microseconds
+  - pattern: '(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.)\d{6}(Z?)'
+    replacement: '\1[MICRO]\2'
+
+  # Generic hexadecimal strings (potential tokens/secrets)
+  # Matches: 0x1234567890abcdef, hex:abcdef123456
+  # Result: 0x[HEX], hex:[HEX]
+  # Note: Only matches long hex strings (16+ chars) to avoid false positives
+  - pattern: '\b(0x|hex:)[0-9a-f]{16,}\b'
+    replacement: '\1[HEX]'

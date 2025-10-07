@@ -1,0 +1,160 @@
+# .dockerignore - Docker build context exclusions
+# Purpose: Optimize Docker build by excluding unnecessary files
+# Target: 10-20% build context size reduction per Section 8.4.3
+
+# =============================================================================
+# Version Control
+# =============================================================================
+.git
+.gitignore
+.gitattributes
+.gitmodules
+
+# =============================================================================
+# Python Cache and Compiled Files
+# =============================================================================
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# =============================================================================
+# Testing Artifacts
+# =============================================================================
+.pytest_cache
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.pytype/
+tests/
+*.test
+*.spec
+
+# =============================================================================
+# Development Dependencies
+# =============================================================================
+requirements-dev.txt
+.pre-commit-config.yaml
+
+# =============================================================================
+# Documentation
+# =============================================================================
+docs/
+*.md
+README.md
+LICENSE
+AUTHORS
+CHANGELOG
+CONTRIBUTING.md
+
+# =============================================================================
+# IDE and Editor Files
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+
+# =============================================================================
+# Environment and Configuration Files
+# =============================================================================
+.env
+.env.*
+*.local
+.envrc
+
+# =============================================================================
+# CI/CD Configuration
+# =============================================================================
+.github/
+.gitlab-ci.yml
+.circleci/
+.travis.yml
+Jenkinsfile
+azure-pipelines.yml
+
+# =============================================================================
+# Infrastructure as Code
+# =============================================================================
+deploy/terraform/
+*.tf
+*.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# =============================================================================
+# Local Development Artifacts
+# =============================================================================
+docker-compose.yml
+docker-compose.override.yml
+docker-compose.*.yml
+Dockerfile.dev
+Makefile
+
+# =============================================================================
+# Monitoring and Observability (Local Only)
+# =============================================================================
+*.log
+logs/
+tmp/
+temp/
+
+# =============================================================================
+# Virtual Environments
+# =============================================================================
+venv/
+ENV/
+env/
+.venv
+
+# =============================================================================
+# Security and Secrets (Should never be in repo, but extra safety)
+# =============================================================================
+*.pem
+*.key
+*.crt
+secrets/
+.secrets/
+
+# =============================================================================
+# Build Artifacts
+# =============================================================================
+*.tar.gz
+*.zip
+*.rar
+
+# Note: This configuration ensures only production-required files are included:
+# - src/ (application code)
+# - config/ (runtime configuration YAML files)
+# - requirements.txt (production dependencies only)
+# All development, testing, and infrastructure files are excluded per Section 8.4.2

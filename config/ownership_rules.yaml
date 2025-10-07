@@ -1,0 +1,210 @@
+# Ownership Resolution Rules Configuration
+# ==========================================
+# This file defines pattern-based assignment rules for automatic Jira issue routing.
+# The OwnershipResolver service loads these rules to determine issue assignees based on
+# error characteristics (service name, URL path patterns, error class types).
+#
+# EVALUATION LOGIC:
+# - Rules are evaluated in ascending priority order (lower numbers = higher priority)
+# - First matching rule determines the assignment
+# - If no rules match, issue is created without assignee (Jira project default applies)
+#
+# PATTERN MATCHING:
+# - service: Exact string match (case-sensitive)
+# - path_regex: Python regex pattern matched against error path/URL
+# - error_class: Exact string match or regex pattern for exception types
+#
+# ASSIGNMENT TARGETS:
+# - assignee: Direct assignment using Atlassian account ID (user-specific)
+# - component: Jira component name with configured default assignee
+# - Both fields are optional; at least one should be specified per rule
+#
+# HOW TO OBTAIN ATLASSIAN ACCOUNT IDS:
+# 1. Navigate to Jira Settings → User Management
+# 2. Click on user profile
+# 3. Copy the "Account ID" field (format: 5f8e9a1b2c3d4e5f6a7b8c9d)
+# 4. Use this ID in the "assignee" field below
+#
+# REGEX PATTERN SYNTAX:
+# - Use Python regex syntax (re module)
+# - Common patterns:
+#   * /api/.* - Matches any path starting with /api/
+#   * /checkout|/payment - Matches either /checkout or /payment
+#   * ^/admin/ - Matches paths beginning with /admin/
+#   * .*\.tsx$ - Matches paths ending with .tsx (TypeScript React files)
+#
+# RULE PRECEDENCE STRATEGY:
+# - Priority 1-10: Specific error patterns requiring immediate attention
+# - Priority 11-50: Service-specific routing by path or error type
+# - Priority 51-100: General service defaults
+# - Priority 900+: Catch-all fallback rules
+
+# Schema version for rule file format (enables future schema migrations)
+version: "1.0"
+
+# Rules array: Evaluated in ascending priority order
+rules:
+  # ============================================================================
+  # HIGH PRIORITY RULES (1-10): Critical error patterns
+  # ============================================================================
+
+  - priority: 1
+    service: "web-app-checkout"
+    error_class: "PaymentProcessingError"
+    assignee: "5f8e9a1b2c3d4e5f6a7b8c9d"  # Backend team lead (replace with actual account ID)
+    description: "Critical payment errors assigned to backend lead for immediate investigation"
+
+  - priority: 2
+    service: "web-app-checkout"
+    path_regex: "/api/checkout.*"
+    assignee: "5f8e9a1b2c3d4e5f6a7b8c9d"  # Backend team lead
+    description: "All checkout API errors routed to backend team lead due to business criticality"
+
+  # ============================================================================
+  # SERVICE-SPECIFIC RULES (11-50): Path and error type patterns
+  # ============================================================================
+
+  - priority: 10
+    service: "web-app"
+    path_regex: "/api/.*"
+    assignee: "5f8e9a1b2c3d4e5f6a7b8c9d"  # Backend team lead
+    description: "Web app API backend errors assigned to backend team lead"
+
+  - priority: 11
+    service: "web-app"
+    error_class: "TypeError"
+    component: "Frontend"
+    description: "TypeError exceptions in web app routed to Frontend component (JavaScript/TypeScript issues)"
+
+  - priority: 12
+    service: "web-app"
+    error_class: "ReferenceError"
+    component: "Frontend"
+    description: "ReferenceError exceptions routed to Frontend component (undefined variable access)"
+
+  - priority: 13
+    service: "web-app"
+    path_regex: ".*\\.tsx$"
+    component: "Frontend"
+    description: "Errors in TypeScript React files (.tsx) routed to Frontend component"
+
+  - priority: 14
+    service: "web-app"
+    path_regex: "/admin/.*"
+    assignee: "6a9f8b2c3d4e5f7a8b9c0d1e"  # Admin panel owner (replace with actual account ID)
+    description: "Admin panel errors assigned to dedicated owner for access control issues"
+
+  - priority: 15
+    service: "api-gateway"
+    error_class: "AuthenticationError"
+    assignee: "7b0g9c3d4e5f8a9b0c1d2e3f"  # Security team lead (replace with actual account ID)
+    description: "Authentication failures in API gateway routed to security team"
+
+  - priority: 16
+    service: "api-gateway"
+    error_class: "RateLimitExceeded"
+    component: "Infrastructure"
+    description: "Rate limiting errors routed to Infrastructure component for capacity planning"
+
+  - priority: 20
+    service: "data-pipeline"
+    error_class: "DatabaseConnectionError"
+    assignee: "8c1h0d4e5f9a0b1c2d3e4f5g"  # Database administrator (replace with actual account ID)
+    description: "Database connection failures assigned to DBA for investigation"
+
+  - priority: 21
+    service: "data-pipeline"
+    error_class: "ValidationError"
+    component: "Data Engineering"
+    description: "Data validation errors routed to Data Engineering component"
+
+  # ============================================================================
+  # GENERAL SERVICE DEFAULTS (51-100): Broad service routing
+  # ============================================================================
+
+  - priority: 50
+    service: "web-app"
+    component: "Web Application"
+    description: "Default routing for all other web app errors (catch-all for web-app service)"
+
+  - priority: 51
+    service: "api-gateway"
+    component: "API Gateway"
+    description: "Default routing for API gateway errors not matching specific patterns"
+
+  - priority: 52
+    service: "data-pipeline"
+    component: "Data Engineering"
+    description: "Default routing for data pipeline errors"
+
+  - priority: 53
+    service: "notification-service"
+    component: "Notifications"
+    description: "All notification service errors routed to Notifications component"
+
+  - priority: 54
+    service: "auth-service"
+    assignee: "7b0g9c3d4e5f8a9b0c1d2e3f"  # Security team lead
+    description: "Authentication service errors assigned to security team by default"
+
+  # ============================================================================
+  # ENVIRONMENT-SPECIFIC OVERRIDES (100-150): Special handling by environment
+  # ============================================================================
+
+  # Note: Environment is not a direct rule field but can be encoded in service names
+  # Example: service="web-app-staging" vs service="web-app-production"
+  # For environment-aware routing, use separate service identifiers or extend rule schema
+
+  # ============================================================================
+  # CATCH-ALL FALLBACK (900+): Last resort routing
+  # ============================================================================
+
+  - priority: 900
+    service: "*"  # Wildcard (requires custom implementation in OwnershipResolver)
+    component: "Triage"
+    description: "Catch-all rule for errors from unrecognized services (manual triage required)"
+
+# ============================================================================
+# CONFIGURATION NOTES
+# ============================================================================
+#
+# 1. RULE ORDERING:
+#    - Lower priority numbers are evaluated first
+#    - First matching rule wins (subsequent rules ignored)
+#    - Design rules from most specific (low priority) to most general (high priority)
+#
+# 2. REGEX PERFORMANCE:
+#    - Complex regex patterns may impact processing performance
+#    - Test patterns with production error data to validate matches
+#    - Use anchors (^ and $) to prevent partial matches when exact matching needed
+#
+# 3. COMPONENT CONFIGURATION:
+#    - Jira components must exist in the project before use
+#    - Component default assignees are configured in Jira project settings
+#    - If component has no default assignee, issue remains unassigned
+#
+# 4. ASSIGNEE vs COMPONENT:
+#    - assignee: Direct assignment (highest specificity)
+#    - component: Uses component's default assignee (flexible for team changes)
+#    - Only one can be specified per rule; choose assignee for direct routing or component for team-based routing
+#
+# 5. TESTING RULES:
+#    - Use OwnershipResolver.resolve(event) method to test rule matching
+#    - Verify rules with production error samples before deployment
+#    - Monitor unassigned issues to identify gaps in rule coverage
+#
+# 6. RULE MAINTENANCE:
+#    - Update Atlassian account IDs when team membership changes
+#    - Review rule effectiveness quarterly via Jira issue assignment metrics
+#    - Add new rules for emerging error patterns or new services
+#    - Archive rules for deprecated services
+#
+# 7. SECURITY CONSIDERATIONS:
+#    - Atlassian account IDs are non-sensitive (public within Jira workspace)
+#    - This file should still be stored in version control with access controls
+#    - Changes tracked via configuration_history MongoDB collection
+#
+# 8. HOT-RELOAD SUPPORT:
+#    - Service supports SIGHUP signal to reload configuration without restart
+#    - Configuration changes automatically logged to configuration_history collection
+#    - Test rule changes in staging before applying to production

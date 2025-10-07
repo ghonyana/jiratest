@@ -1,0 +1,135 @@
+version: '3.9'
+
+# Docker Compose configuration for local development environment
+# Provides Flask application, Redis cache, and MongoDB (optional) for complete local testing
+
+services:
+  # Main Flask application service
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: error-triage-app
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount source code and config for hot-reload (read-only for safety)
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+    environment:
+      # Service configuration
+      FLASK_ENV: development
+      FLASK_DEBUG: 1
+      PYTHONUNBUFFERED: 1
+      
+      # Redis connection (use container name as hostname)
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      
+      # MongoDB connection (optional - only used if ENABLE_MONGO=true)
+      MONGODB_URI: mongodb://admin:password@mongodb:27017/jiratest-dev?authSource=admin
+      ENABLE_MONGO: "false"  # Set to "true" to enable MongoDB audit logging
+      
+      # Jira configuration (use dummy values for local dev without real Jira)
+      JIRA_BASE_URL: https://example.atlassian.net
+      JIRA_API_TOKEN: dummy-token-for-local-dev
+      JIRA_PROJECT_KEY: ET
+      
+      # Webhook secrets for authentication testing
+      VERCEL_WEBHOOK_SECRET: local-dev-vercel-secret
+      GCP_WEBHOOK_AUDIENCE: http://localhost:8080/events
+      
+      # Rate limiting and thresholds
+      COMMENT_RATE_LIMIT_MINUTES: 15
+      DEDUPLICATION_TTL_SECONDS: 3600
+      FREQUENCY_WINDOW_SECONDS: 300
+      
+      # AWS configuration (not used in local dev, but prevents errors)
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: dummy
+      AWS_SECRET_ACCESS_KEY: dummy
+    depends_on:
+      redis:
+        condition: service_healthy
+      # MongoDB dependency is optional - uncomment to require MongoDB startup
+      # mongodb:
+      #   condition: service_healthy
+    networks:
+      - error-triage-network
+    command: >
+      gunicorn
+      --bind 0.0.0.0:8080
+      --workers 2
+      --threads 2
+      --timeout 30
+      --reload
+      --access-logfile -
+      --error-logfile -
+      --log-level debug
+      src.app:create_app()
+    restart: unless-stopped
+
+  # Redis cache for frequency counters, deduplication, and rate limiting
+  redis:
+    image: redis:7.2-alpine
+    container_name: error-triage-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - error-triage-network
+    restart: unless-stopped
+
+  # MongoDB for audit logging (OPTIONAL - can be commented out if not needed)
+  # Uncomment the entire mongodb service block below to enable audit logging
+  
+  # mongodb:
+  #   image: mongo:7.0
+  #   container_name: error-triage-mongodb
+  #   ports:
+  #     - "27017:27017"
+  #   environment:
+  #     MONGO_INITDB_ROOT_USERNAME: admin
+  #     MONGO_INITDB_ROOT_PASSWORD: password
+  #     MONGO_INITDB_DATABASE: jiratest-dev
+  #   volumes:
+  #     - mongodb-data:/data/db
+  #     - mongodb-config:/data/configdb
+  #   healthcheck:
+  #     test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
+  #     start_period: 10s
+  #   networks:
+  #     - error-triage-network
+  #   restart: unless-stopped
+
+# Shared network for service communication
+networks:
+  error-triage-network:
+    driver: bridge
+    name: error-triage-network
+
+# Named volumes for data persistence across container restarts
+volumes:
+  redis-data:
+    name: error-triage-redis-data
+  # Uncomment MongoDB volumes if enabling MongoDB service
+  # mongodb-data:
+  #   name: error-triage-mongodb-data
+  # mongodb-config:
+  #   name: error-triage-mongodb-config

@@ -1,0 +1,873 @@
+#
+# GitHub Actions Deployment Workflow
+# Error Triage → Jira Upserter Service
+#
+# Purpose: Orchestrate Terraform infrastructure provisioning and ECS rolling updates
+# with comprehensive post-deployment validation and automatic rollback capabilities.
+#
+# Workflow Stages:
+#   1. Terraform Plan - Review infrastructure changes
+#   2. Terraform Apply - Provision/update AWS resources
+#   3. ECS Deployment - Rolling update with circuit breaker protection
+#   4. Smoke Tests - Validate service health and functionality
+#   5. Notifications - Alert stakeholders of deployment status
+#
+# Deployment Strategy:
+#   - Staging: Auto-deploy on merge to main branch (no approval required)
+#   - Production: Manual deploy on release tags (requires 2 approvals)
+#
+# Technical Spec References:
+#   - Section 8.6.5: Rolling update strategy with circuit breaker
+#   - Section 8.6.6: Extended post-deployment validation requirements
+#   - Section 8.6.2: Environment-specific deployment triggers
+#
+# Rollback Procedures:
+#   Method A (Fast - ECS Task Definition Revert):
+#     aws ecs update-service --cluster jiratest-error-triage-{env} \
+#       --service jiratest-error-triage-{env} \
+#       --task-definition jiratest-error-triage:{previous-revision} \
+#       --force-new-deployment
+#     Time: 5-10 minutes
+#
+#   Method B (Complete - Terraform State Revert):
+#     git revert {failed-commit}
+#     git push origin main  # triggers redeploy workflow
+#     Time: 10-15 minutes
+#
+
+name: Deploy Error Triage Service
+
+on:
+  # Automatic staging deployment on main branch
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'config/**'
+      - 'deploy/terraform/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - '.github/workflows/deploy.yml'
+
+  # Production deployment on release tags (requires approval)
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+  # Manual deployment trigger with environment selection
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment for deployment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      skip_smoke_tests:
+        description: 'Skip smoke tests (emergency only)'
+        required: false
+        type: boolean
+        default: false
+
+# Workflow-level permissions for OIDC authentication
+permissions:
+  id-token: write   # Required for AWS OIDC authentication
+  contents: read    # Required for checkout
+  pull-requests: write  # Required for PR comments with plan output
+
+# Environment variables used across all jobs
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: '1.6.0'
+  ECS_CLUSTER_PREFIX: jiratest-error-triage
+  SERVICE_NAME_PREFIX: jiratest-error-triage
+  DEPLOYMENT_TIMEOUT_MINUTES: 15
+  SMOKE_TEST_TIMEOUT_MINUTES: 10
+
+jobs:
+  #
+  # Job 1: Determine Target Environment
+  # Evaluates trigger type to set deployment environment
+  #
+  determine-environment:
+    name: Determine Deployment Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      requires_approval: ${{ steps.set-env.outputs.requires_approval }}
+    
+    steps:
+      - name: Set environment based on trigger
+        id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+            if [[ "${{ inputs.environment }}" == "production" ]]; then
+              echo "requires_approval=true" >> $GITHUB_OUTPUT
+            else
+              echo "requires_approval=false" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "requires_approval=true" >> $GITHUB_OUTPUT
+          else
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "requires_approval=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Display deployment target
+        run: |
+          echo "::notice::Deploying to environment: ${{ steps.set-env.outputs.environment }}"
+          echo "::notice::Requires approval: ${{ steps.set-env.outputs.requires_approval }}"
+
+  #
+  # Job 2: Terraform Plan
+  # Generate infrastructure change plan for review
+  #
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: determine-environment
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+    
+    outputs:
+      plan_artifact: terraform-plan-${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsDeployRole
+          role-session-name: github-actions-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        working-directory: deploy/terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=jiratest-terraform-state" \
+            -backend-config="key=error-triage/${{ needs.determine-environment.outputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=jiratest-terraform-locks"
+
+      - name: Terraform Format Check
+        working-directory: deploy/terraform
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Terraform Validate
+        working-directory: deploy/terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: deploy/terraform
+        env:
+          TF_VAR_environment: ${{ needs.determine-environment.outputs.environment }}
+          TF_VAR_docker_image_tag: ${{ github.sha }}
+        run: |
+          terraform plan \
+            -var-file="environments/${{ needs.determine-environment.outputs.environment }}.tfvars" \
+            -out=tfplan \
+            -no-color | tee plan_output.txt
+          
+          # Extract plan summary
+          echo "PLAN_SUMMARY<<EOF" >> $GITHUB_ENV
+          tail -n 20 plan_output.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Comment plan summary on PR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### Terraform Plan Summary 📋
+            **Environment:** \`${{ needs.determine-environment.outputs.environment }}\`
+            **Docker Image Tag:** \`${{ github.sha }}\`
+            
+            <details><summary>Show Plan Output</summary>
+            
+            \`\`\`
+            ${{ env.PLAN_SUMMARY }}
+            \`\`\`
+            
+            </details>
+            
+            *Triggered by commit: ${{ github.sha }}*`;
+            
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: output
+            });
+
+      - name: Upload Terraform plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ needs.determine-environment.outputs.environment }}
+          path: deploy/terraform/tfplan
+          retention-days: 7
+
+      - name: Upload plan output for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-output-${{ needs.determine-environment.outputs.environment }}
+          path: deploy/terraform/plan_output.txt
+          retention-days: 7
+
+  #
+  # Job 3: Terraform Apply
+  # Execute infrastructure changes and update ECS task definition
+  #
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: [determine-environment, terraform-plan]
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+    
+    outputs:
+      service_url: ${{ steps.tf-output.outputs.service_url }}
+      redis_endpoint: ${{ steps.tf-output.outputs.redis_endpoint }}
+      cloudwatch_log_group: ${{ steps.tf-output.outputs.cloudwatch_log_group }}
+      ecs_cluster: ${{ steps.tf-output.outputs.ecs_cluster }}
+      ecs_service: ${{ steps.tf-output.outputs.ecs_service }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsDeployRole
+          role-session-name: github-actions-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false  # Required for capturing outputs
+
+      - name: Terraform Init
+        working-directory: deploy/terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=jiratest-terraform-state" \
+            -backend-config="key=error-triage/${{ needs.determine-environment.outputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=jiratest-terraform-locks"
+
+      - name: Download Terraform plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ needs.determine-environment.outputs.environment }}
+          path: deploy/terraform
+
+      - name: Terraform Apply
+        working-directory: deploy/terraform
+        run: |
+          terraform apply -auto-approve tfplan
+
+      - name: Extract Terraform outputs
+        id: tf-output
+        working-directory: deploy/terraform
+        run: |
+          echo "service_url=$(terraform output -raw service_url)" >> $GITHUB_OUTPUT
+          echo "redis_endpoint=$(terraform output -raw redis_endpoint)" >> $GITHUB_OUTPUT
+          echo "cloudwatch_log_group=$(terraform output -raw cloudwatch_log_group)" >> $GITHUB_OUTPUT
+          echo "ecs_cluster=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_OUTPUT
+          echo "ecs_service=$(terraform output -raw ecs_service_name)" >> $GITHUB_OUTPUT
+
+      - name: Display deployment outputs
+        run: |
+          echo "::notice::Service URL: ${{ steps.tf-output.outputs.service_url }}"
+          echo "::notice::ECS Cluster: ${{ steps.tf-output.outputs.ecs_cluster }}"
+          echo "::notice::ECS Service: ${{ steps.tf-output.outputs.ecs_service }}"
+
+  #
+  # Job 4: ECS Deployment Monitoring
+  # Wait for ECS rolling update to complete and monitor circuit breaker
+  #
+  deploy-ecs:
+    name: Monitor ECS Rolling Deployment
+    runs-on: ubuntu-latest
+    needs: [determine-environment, terraform-apply]
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsDeployRole
+          role-session-name: github-actions-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get current ECS deployment status
+        id: initial-status
+        run: |
+          CLUSTER="${{ needs.terraform-apply.outputs.ecs_cluster }}"
+          SERVICE="${{ needs.terraform-apply.outputs.ecs_service }}"
+          
+          DEPLOYMENT_ID=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].deployments[?status==`PRIMARY`].id' \
+            --output text)
+          
+          echo "deployment_id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+          echo "::notice::Monitoring deployment: $DEPLOYMENT_ID"
+
+      - name: Wait for ECS service to stabilize
+        run: |
+          CLUSTER="${{ needs.terraform-apply.outputs.ecs_cluster }}"
+          SERVICE="${{ needs.terraform-apply.outputs.ecs_service }}"
+          
+          echo "Waiting for ECS service to reach stable state..."
+          echo "Cluster: $CLUSTER"
+          echo "Service: $SERVICE"
+          echo "Timeout: ${{ env.DEPLOYMENT_TIMEOUT_MINUTES }} minutes"
+          
+          # Monitor deployment events in real-time
+          aws ecs wait services-stable \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --cli-read-timeout ${{ env.DEPLOYMENT_TIMEOUT_MINUTES }}00 \
+            --cli-connect-timeout 60
+
+      - name: Check for circuit breaker triggers
+        if: always()
+        run: |
+          CLUSTER="${{ needs.terraform-apply.outputs.ecs_cluster }}"
+          SERVICE="${{ needs.terraform-apply.outputs.ecs_service }}"
+          
+          # Retrieve deployment events from the last 15 minutes
+          EVENTS=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].events[:20]' \
+            --output json)
+          
+          echo "Recent ECS service events:"
+          echo "$EVENTS" | jq -r '.[] | "\(.createdAt) - \(.message)"'
+          
+          # Check for circuit breaker rollback indicators
+          ROLLBACK_COUNT=$(echo "$EVENTS" | jq '[.[] | select(.message | contains("circuit breaker") or contains("rolled back"))] | length')
+          
+          if [ "$ROLLBACK_COUNT" -gt 0 ]; then
+            echo "::error::Circuit breaker triggered! Deployment rolled back automatically."
+            exit 1
+          fi
+
+      - name: Verify task health
+        run: |
+          CLUSTER="${{ needs.terraform-apply.outputs.ecs_cluster }}"
+          SERVICE="${{ needs.terraform-apply.outputs.ecs_service }}"
+          
+          # Get running task count
+          RUNNING_COUNT=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].runningCount' \
+            --output text)
+          
+          DESIRED_COUNT=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].desiredCount' \
+            --output text)
+          
+          echo "::notice::Running tasks: $RUNNING_COUNT / $DESIRED_COUNT"
+          
+          if [ "$RUNNING_COUNT" -ne "$DESIRED_COUNT" ]; then
+            echo "::warning::Running task count does not match desired count"
+          fi
+
+  #
+  # Job 5: Post-Deployment Smoke Tests
+  # Comprehensive validation per Technical Spec Section 8.6.6
+  #
+  smoke-tests:
+    name: Post-Deployment Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [determine-environment, terraform-apply, deploy-ecs]
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+    if: github.event.inputs.skip_smoke_tests != 'true'
+    
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsDeployRole
+          role-session-name: github-actions-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Wait for service warmup
+        run: |
+          echo "Waiting 60 seconds for service to fully initialize..."
+          sleep 60
+
+      #
+      # Smoke Test 1: /healthz Endpoint with Dependency Status
+      # Validates service health and all dependency connectivity
+      #
+      - name: 'Smoke Test 1: Health Check Endpoint'
+        id: test-health
+        run: |
+          SERVICE_URL="${{ needs.terraform-apply.outputs.service_url }}"
+          MAX_ATTEMPTS=10
+          RETRY_INTERVAL=30
+          
+          echo "Testing /healthz endpoint: $SERVICE_URL/healthz"
+          echo "Max attempts: $MAX_ATTEMPTS with $RETRY_INTERVAL second intervals"
+          
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            echo "Attempt $i/$MAX_ATTEMPTS..."
+            
+            HTTP_CODE=$(curl -s -o /tmp/health_response.json -w "%{http_code}" "$SERVICE_URL/healthz")
+            
+            if [ "$HTTP_CODE" == "200" ]; then
+              echo "✓ Health check returned 200 OK"
+              
+              # Parse and validate JSON response
+              STATUS=$(jq -r '.status' /tmp/health_response.json)
+              if [ "$STATUS" == "healthy" ]; then
+                echo "✓ Status is healthy"
+              else
+                echo "::warning::Status is not healthy: $STATUS"
+              fi
+              
+              # Validate dependency checks
+              REDIS_STATUS=$(jq -r '.checks.redis.status' /tmp/health_response.json)
+              JIRA_STATUS=$(jq -r '.checks.jira.status' /tmp/health_response.json)
+              
+              echo "Dependency status:"
+              echo "  Redis: $REDIS_STATUS (latency: $(jq -r '.checks.redis.latency_ms' /tmp/health_response.json)ms)"
+              echo "  Jira: $JIRA_STATUS (latency: $(jq -r '.checks.jira.latency_ms' /tmp/health_response.json)ms)"
+              
+              # MongoDB is optional in v1
+              MONGO_STATUS=$(jq -r '.checks.mongodb.status // "not_configured"' /tmp/health_response.json)
+              echo "  MongoDB: $MONGO_STATUS"
+              
+              # Verify critical dependencies
+              if [ "$REDIS_STATUS" != "up" ] || [ "$JIRA_STATUS" != "up" ]; then
+                echo "::error::Critical dependency is down"
+                exit 1
+              fi
+              
+              # Check latency thresholds
+              REDIS_LATENCY=$(jq -r '.checks.redis.latency_ms' /tmp/health_response.json)
+              JIRA_LATENCY=$(jq -r '.checks.jira.latency_ms' /tmp/health_response.json)
+              
+              if [ "$REDIS_LATENCY" != "null" ] && [ "$(echo "$REDIS_LATENCY > 10" | bc)" -eq 1 ]; then
+                echo "::warning::Redis latency exceeds 10ms threshold: ${REDIS_LATENCY}ms"
+              fi
+              
+              if [ "$JIRA_LATENCY" != "null" ] && [ "$(echo "$JIRA_LATENCY > 500" | bc)" -eq 1 ]; then
+                echo "::warning::Jira latency exceeds 500ms threshold: ${JIRA_LATENCY}ms"
+              fi
+              
+              echo "✓ Smoke Test 1 PASSED: Health check successful"
+              break
+            else
+              echo "✗ Health check returned HTTP $HTTP_CODE"
+              cat /tmp/health_response.json || echo "(no response body)"
+              
+              if [ $i -lt $MAX_ATTEMPTS ]; then
+                echo "Retrying in $RETRY_INTERVAL seconds..."
+                sleep $RETRY_INTERVAL
+              else
+                echo "::error::Health check failed after $MAX_ATTEMPTS attempts"
+                exit 1
+              fi
+            fi
+          done
+
+      #
+      # Smoke Test 2: /metrics Endpoint Prometheus Format
+      # Validates metrics exposition and required metric presence
+      #
+      - name: 'Smoke Test 2: Metrics Endpoint'
+        id: test-metrics
+        run: |
+          SERVICE_URL="${{ needs.terraform-apply.outputs.service_url }}"
+          
+          echo "Testing /metrics endpoint: $SERVICE_URL/metrics"
+          
+          HTTP_CODE=$(curl -s -o /tmp/metrics_response.txt -w "%{http_code}" "$SERVICE_URL/metrics")
+          
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Metrics endpoint returned HTTP $HTTP_CODE"
+            exit 1
+          fi
+          
+          echo "✓ Metrics endpoint returned 200 OK"
+          
+          # Verify Content-Type
+          CONTENT_TYPE=$(curl -s -I "$SERVICE_URL/metrics" | grep -i "content-type" | awk '{print $2}' | tr -d '\r')
+          if [[ "$CONTENT_TYPE" == text/plain* ]]; then
+            echo "✓ Content-Type is text/plain"
+          else
+            echo "::warning::Unexpected Content-Type: $CONTENT_TYPE"
+          fi
+          
+          # Check for required metrics
+          REQUIRED_METRICS=(
+            "events_received_total"
+            "jira_issues_created_total"
+            "jira_comments_added_total"
+            "event_processing_duration_seconds"
+          )
+          
+          echo "Checking for required metrics..."
+          for metric in "${REQUIRED_METRICS[@]}"; do
+            if grep -q "$metric" /tmp/metrics_response.txt; then
+              echo "  ✓ $metric present"
+            else
+              echo "::error::Required metric missing: $metric"
+              exit 1
+            fi
+          done
+          
+          echo "✓ Smoke Test 2 PASSED: All required metrics present"
+
+      #
+      # Smoke Test 3: CloudWatch Logs Structured JSON Validation
+      # Validates log ingestion and structured format
+      #
+      - name: 'Smoke Test 3: CloudWatch Logs Validation'
+        id: test-logs
+        run: |
+          LOG_GROUP="${{ needs.terraform-apply.outputs.cloudwatch_log_group }}"
+          
+          echo "Testing CloudWatch Logs: $LOG_GROUP"
+          
+          # Calculate timestamp for last 5 minutes (in milliseconds)
+          START_TIME=$(($(date +%s) - 300))000
+          
+          # Query recent log events
+          LOG_EVENTS=$(aws logs filter-log-events \
+            --log-group-name "$LOG_GROUP" \
+            --start-time "$START_TIME" \
+            --limit 10 \
+            --output json)
+          
+          EVENT_COUNT=$(echo "$LOG_EVENTS" | jq '.events | length')
+          
+          if [ "$EVENT_COUNT" -lt 1 ]; then
+            echo "::warning::No log events found in last 5 minutes"
+            echo "This may be normal for a fresh deployment"
+          else
+            echo "✓ Found $EVENT_COUNT log events in last 5 minutes"
+            
+            # Parse first log entry as JSON
+            FIRST_LOG=$(echo "$LOG_EVENTS" | jq -r '.events[0].message')
+            
+            # Validate JSON structure
+            if echo "$FIRST_LOG" | jq empty 2>/dev/null; then
+              echo "✓ Log entry is valid JSON"
+              
+              # Check for required fields
+              REQUIRED_FIELDS=("timestamp" "level" "message" "service")
+              for field in "${REQUIRED_FIELDS[@]}"; do
+                if echo "$FIRST_LOG" | jq -e ".$field" > /dev/null 2>&1; then
+                  echo "  ✓ Field '$field' present"
+                else
+                  echo "::warning::Required field missing: $field"
+                fi
+              done
+            else
+              echo "::warning::First log entry is not valid JSON"
+            fi
+            
+            # Check for ERROR-level logs during startup
+            ERROR_COUNT=$(echo "$LOG_EVENTS" | jq '[.events[] | select(.message | contains("ERROR"))] | length')
+            if [ "$ERROR_COUNT" -gt 0 ]; then
+              echo "::warning::Found $ERROR_COUNT ERROR-level logs during startup"
+              echo "$LOG_EVENTS" | jq -r '.events[] | select(.message | contains("ERROR")) | .message'
+            else
+              echo "✓ No ERROR-level logs during startup"
+            fi
+          fi
+          
+          echo "✓ Smoke Test 3 PASSED: CloudWatch Logs validation complete"
+
+      #
+      # Smoke Test 4: Basic Load Test with Synthetic Events
+      # Validates event processing pipeline end-to-end
+      #
+      - name: 'Smoke Test 4: Synthetic Load Test'
+        id: test-load
+        run: |
+          SERVICE_URL="${{ needs.terraform-apply.outputs.service_url }}"
+          VERCEL_SECRET="${{ secrets.VERCEL_WEBHOOK_SECRET }}"
+          
+          echo "Testing synthetic webhook events"
+          
+          # Capture baseline metrics
+          BASELINE_METRICS=$(curl -s "$SERVICE_URL/metrics")
+          BASELINE_COUNT=$(echo "$BASELINE_METRICS" | grep "events_received_total" | awk '{print $2}' | head -n 1)
+          echo "Baseline events_received_total: ${BASELINE_COUNT:-0}"
+          
+          # Generate 10 synthetic Vercel webhook payloads
+          SUCCESS_COUNT=0
+          for i in $(seq 1 10); do
+            PAYLOAD=$(cat <<EOF
+          {
+            "source": "vercel",
+            "deployment": {
+              "id": "dpl_test_${i}_${{ github.run_id }}",
+              "url": "test-app-${{ github.run_id }}.vercel.app"
+            },
+            "message": "Test error message ${i}",
+            "level": "error",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)",
+            "environment": "staging",
+            "path": "/api/test",
+            "traceId": "trace_${i}_${{ github.run_id }}"
+          }
+          EOF
+          )
+            
+            # Compute HMAC-SHA256 signature
+            SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$VERCEL_SECRET" | awk '{print $2}')
+            
+            # Send POST request
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST \
+              -H "Content-Type: application/json" \
+              -H "x-vercel-signature: $SIGNATURE" \
+              -d "$PAYLOAD" \
+              "$SERVICE_URL/events")
+            
+            if [ "$HTTP_CODE" == "202" ]; then
+              echo "  Event $i: HTTP 202 Accepted ✓"
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            else
+              echo "  Event $i: HTTP $HTTP_CODE ✗"
+            fi
+          done
+          
+          echo "Successfully accepted: $SUCCESS_COUNT/10 events"
+          
+          if [ "$SUCCESS_COUNT" -ne 10 ]; then
+            echo "::error::Not all synthetic events were accepted"
+            exit 1
+          fi
+          
+          # Wait for async processing
+          echo "Waiting 5 seconds for async processing..."
+          sleep 5
+          
+          # Query updated metrics
+          UPDATED_METRICS=$(curl -s "$SERVICE_URL/metrics")
+          UPDATED_COUNT=$(echo "$UPDATED_METRICS" | grep "events_received_total" | awk '{print $2}' | head -n 1)
+          echo "Updated events_received_total: ${UPDATED_COUNT:-0}"
+          
+          # Verify increment
+          INCREMENT=$((UPDATED_COUNT - BASELINE_COUNT))
+          if [ "$INCREMENT" -eq 10 ]; then
+            echo "✓ Metric incremented by exactly 10"
+          else
+            echo "::warning::Metric incremented by $INCREMENT (expected 10)"
+          fi
+          
+          # Verify no ECS task crashes
+          CLUSTER="${{ needs.terraform-apply.outputs.ecs_cluster }}"
+          SERVICE="${{ needs.terraform-apply.outputs.ecs_service }}"
+          
+          RUNNING_COUNT=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].runningCount' \
+            --output text)
+          
+          DESIRED_COUNT=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].desiredCount' \
+            --output text)
+          
+          if [ "$RUNNING_COUNT" -eq "$DESIRED_COUNT" ]; then
+            echo "✓ No task crashes during load test ($RUNNING_COUNT/$DESIRED_COUNT running)"
+          else
+            echo "::error::Task count mismatch: $RUNNING_COUNT running, $DESIRED_COUNT desired"
+            exit 1
+          fi
+          
+          echo "✓ Smoke Test 4 PASSED: Load test successful"
+
+      - name: Upload smoke test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-results-${{ needs.determine-environment.outputs.environment }}
+          path: /tmp/*_response.*
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Summary of all smoke tests
+        if: always()
+        run: |
+          echo "### Smoke Test Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 1. Health Check | ${{ steps.test-health.outcome == 'success' && '✓ PASSED' || '✗ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 2. Metrics Endpoint | ${{ steps.test-metrics.outcome == 'success' && '✓ PASSED' || '✗ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 3. CloudWatch Logs | ${{ steps.test-logs.outcome == 'success' && '✓ PASSED' || '✗ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 4. Synthetic Load Test | ${{ steps.test-load.outcome == 'success' && '✓ PASSED' || '✗ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+
+  #
+  # Job 6: Notifications
+  # Alert stakeholders of deployment outcome
+  #
+  notify:
+    name: Send Deployment Notifications
+    runs-on: ubuntu-latest
+    needs: [determine-environment, terraform-apply, deploy-ecs, smoke-tests]
+    if: always()
+    
+    steps:
+      - name: Determine deployment status
+        id: status
+        run: |
+          if [[ "${{ needs.smoke-tests.result }}" == "success" ]] && \
+             [[ "${{ needs.deploy-ecs.result }}" == "success" ]] && \
+             [[ "${{ needs.terraform-apply.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Slack notification (Staging)
+        if: needs.determine-environment.outputs.environment == 'staging'
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "${{ steps.status.outputs.emoji }} Staging Deployment ${{ steps.status.outputs.status == 'success' && 'Successful' || 'Failed' }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "${{ steps.status.outputs.emoji }} Error Triage Service - Staging Deployment"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Status:*\n${{ steps.status.outputs.status == 'success' && 'Success' || 'Failed' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\nStaging"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit:*\n<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Workflow:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Service URL:*\n${{ needs.terraform-apply.outputs.service_url }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Send email notification (Production)
+        if: needs.determine-environment.outputs.environment == 'production'
+        run: |
+          # Email notification for production deployments
+          # Requires AWS SES configuration or external email service
+          
+          SUBJECT="${{ steps.status.outputs.emoji }} Error Triage Service - Production Deployment ${{ steps.status.outputs.status == 'success' && 'Successful' || 'Failed' }}"
+          
+          BODY=$(cat <<EOF
+          Production Deployment Report
+          ============================
+          
+          Status: ${{ steps.status.outputs.status }}
+          Environment: Production
+          Commit: ${{ github.sha }}
+          Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          
+          Service URL: ${{ needs.terraform-apply.outputs.service_url }}
+          ECS Cluster: ${{ needs.terraform-apply.outputs.ecs_cluster }}
+          ECS Service: ${{ needs.terraform-apply.outputs.ecs_service }}
+          
+          Deployment Duration: ${{ github.event.workflow_run.updated_at }}
+          
+          CloudWatch Dashboard: https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#dashboards:name=ErrorTriageService-Production
+          EOF
+          )
+          
+          echo "$BODY"
+          
+          # Uncomment when email service is configured:
+          # aws ses send-email \
+          #   --from "deployments@jiratest.com" \
+          #   --to "platform-team@jiratest.com" \
+          #   --subject "$SUBJECT" \
+          #   --text "$BODY"
+
+      - name: Create deployment status comment
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ steps.status.outputs.status }}';
+            const emoji = '${{ steps.status.outputs.emoji }}';
+            const env = '${{ needs.determine-environment.outputs.environment }}';
+            
+            const output = `${emoji} **Deployment to ${env}: ${status}**
+            
+            **Service URL:** ${{ needs.terraform-apply.outputs.service_url }}
+            **ECS Cluster:** ${{ needs.terraform-apply.outputs.ecs_cluster }}
+            **ECS Service:** ${{ needs.terraform-apply.outputs.ecs_service }}
+            
+            **Smoke Tests:**
+            - Health Check: ${{ needs.smoke-tests.result }}
+            - Metrics Endpoint: ${{ needs.smoke-tests.result }}
+            - CloudWatch Logs: ${{ needs.smoke-tests.result }}
+            - Load Test: ${{ needs.smoke-tests.result }}
+            
+            [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+            
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: '${{ github.sha }}',
+              body: output
+            });

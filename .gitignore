@@ -1,0 +1,315 @@
+# Error Triage Service - Git Ignore File
+# Prevents sensitive data and development artifacts from being committed
+
+# ============================================================================
+# Python
+# ============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# ============================================================================
+# Virtual Environments
+# ============================================================================
+
+venv/
+env/
+ENV/
+.venv/
+env.bak/
+venv.bak/
+pythonenv*/
+
+# ============================================================================
+# Testing and Coverage
+# ============================================================================
+
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+nosetests.xml
+test-results/
+junit.xml
+
+# ============================================================================
+# Environment Variables and Secrets (SECURITY CRITICAL)
+# ============================================================================
+
+# Environment files
+.env
+.env.*
+!.env.example
+*.local
+.envrc
+
+# Secret files
+secrets.yaml
+secrets.yml
+secrets.json
+*_secret.yaml
+*_secret.yml
+*_secret.json
+
+# AWS credentials
+.aws/
+*.pem
+*.key
+credentials
+
+# ============================================================================
+# IDE and Editor Configurations
+# ============================================================================
+
+# Visual Studio Code
+.vscode/
+.vscode-server/
+*.code-workspace
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+.idea_modules/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.*.sw[a-p]
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+
+# ============================================================================
+# Logs
+# ============================================================================
+
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+pip-log.txt
+
+# ============================================================================
+# Terraform
+# ============================================================================
+
+# State files
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Terraform directories
+.terraform/
+.terraform.lock.hcl
+
+# Terraform variable files (may contain sensitive data)
+terraform.tfvars
+*.auto.tfvars
+*.tfvars.json
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ============================================================================
+# Docker
+# ============================================================================
+
+# Docker volumes
+.docker/
+docker-compose.override.yml
+
+# ============================================================================
+# Application Specific
+# ============================================================================
+
+# Local configuration overrides
+config/local/
+config/*.local.yaml
+config/*.local.yml
+config/*.local.json
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+
+# Database files (local development)
+*.db
+*.sqlite
+*.sqlite3
+
+# ============================================================================
+# Build Artifacts
+# ============================================================================
+
+# Python build
+*.pyc
+*.pyo
+*.pyd
+
+# Compiled files
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# ============================================================================
+# Development and Debugging
+# ============================================================================
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# ============================================================================
+# CI/CD
+# ============================================================================
+
+# Test reports
+test-output/
+test-reports/
+
+# ============================================================================
+# Monitoring and Observability
+# ============================================================================
+
+# Prometheus data
+prometheus_data/
+
+# Grafana data
+grafana_data/
+
+# ============================================================================
+# Temporary Test Files (Blitzy Platform)
+# ============================================================================
+
+# Blitzy adhoc test files
+blitzy_adhoc_test_*
+
+# ============================================================================
+# Node.js (if any frontend tooling is added later)
+# ============================================================================
+
+node_modules/
+package-lock.json
+yarn.lock
+
+# ============================================================================
+# Miscellaneous
+# ============================================================================
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# Backup files
+*~
+*.orig
+*.rej
+
+# OS generated files
+.fuse_hidden*

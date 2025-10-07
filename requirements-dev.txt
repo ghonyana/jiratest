@@ -1,0 +1,25 @@
+# Development Dependencies for Error Triage → Jira Upserter Service
+# Uses compatible release specifications (~=) to allow patch updates while preventing breaking changes
+
+# Testing Framework
+pytest~=8.3.0          # Testing framework for unit and integration tests
+pytest-cov~=6.0.0      # Code coverage reporting with pytest integration
+pytest-mock~=3.14.0    # Mocking utilities for pytest test cases
+pytest-asyncio~=0.24.0 # Async test support for asyncio code
+
+# Code Quality and Linting
+black~=24.10.0         # Opinionated code formatter (PEP 8 compliant)
+flake8~=7.1.0          # Linting and style checking (PEP 8 enforcement)
+mypy~=1.14.0           # Static type checker for Python type hints
+isort~=5.13.0          # Import statement sorting and organization
+
+# Security Scanning
+bandit~=1.8.0          # Security vulnerability scanner for Python code
+
+# Test Utilities
+fakeredis~=2.27.0      # In-memory fake Redis server for testing
+responses~=0.25.0      # HTTP request mocking for requests library
+freezegun~=1.5.0       # Time and datetime mocking for tests
+
+# Development Workflow
+pre-commit~=4.0.0      # Git hook management for code quality checks

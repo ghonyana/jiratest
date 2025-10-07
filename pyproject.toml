@@ -1,0 +1,161 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jiratest-error-triage"
+version = "1.0.0"
+description = "Error Triage → Jira Upserter service: Intelligent error management system integrating Vercel and GCP error sources with Jira issue tracking"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Blitzy Platform", email = "engineering@blitzy.com"},
+]
+keywords = ["error-tracking", "jira", "observability", "incident-management"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+]
+dependencies = [
+    "flask>=3.1.2",
+    "jira>=3.10.5",
+    "redis>=6.4.0",
+    "pymongo>=4.10.1",
+    "pydantic>=2.10.4",
+    "pyyaml>=6.0.2",
+    "boto3>=1.35.90",
+    "prometheus-client>=0.21.0",
+    "python-json-logger>=3.2.1",
+    "requests>=2.32.3",
+    "cryptography>=44.0.0",
+    "google-auth>=2.37.0",
+    "gunicorn>=23.0.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-cov>=6.0.0",
+    "pytest-mock>=3.14.0",
+    "pytest-asyncio>=0.24.0",
+    "black>=24.10.0",
+    "flake8>=7.1.1",
+    "mypy>=1.14.0",
+    "isort>=5.13.2",
+    "bandit>=1.8.0",
+    "fakeredis>=2.27.2",
+    "responses>=0.25.3",
+    "freezegun>=1.5.1",
+    "pre-commit>=4.0.1",
+]
+
+[project.urls]
+Documentation = "https://github.com/blitzy/jiratest-error-triage/blob/main/README.md"
+Repository = "https://github.com/blitzy/jiratest-error-triage"
+Issues = "https://github.com/blitzy/jiratest-error-triage/issues"
+
+[tool.black]
+line-length = 120
+target-version = ['py311']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | \.tox
+  | \.eggs
+  | __pycache__
+  | build
+  | dist
+  | node_modules
+  | \.pytest_cache
+  | \.mypy_cache
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 120
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+known_first_party = ["app", "models", "services", "utils"]
+sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_optional = true
+ignore_missing_imports = true
+# Ignore missing type stubs for third-party libraries without official stubs
+[[tool.mypy.overrides]]
+module = [
+    "jira.*",
+    "redis.*",
+    "pymongo.*",
+    "boto3.*",
+    "botocore.*",
+    "google.auth.*",
+    "prometheus_client.*",
+    "pythonjsonlogger.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --strict-markers --cov=src --cov-report=term-missing --cov-report=html"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__init__.py",
+    "*/conftest.py",
+]
+branch = true
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+fail_under = 80
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "if typing.TYPE_CHECKING:",
+    "@abstractmethod",
+    "@abc.abstractmethod",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", "venv", ".venv", "build", "dist"]
+tests = ["B201", "B301", "B302", "B303", "B304", "B305", "B306", "B307", "B308", "B309", "B310", "B311", "B312", "B313", "B314", "B315", "B316", "B317", "B318", "B319", "B320", "B321", "B323", "B324", "B325", "B401", "B402", "B403", "B404", "B405", "B406", "B407", "B408", "B409", "B410", "B411", "B412", "B413", "B501", "B502", "B503", "B504", "B505", "B506", "B507", "B601", "B602", "B603", "B604", "B605", "B606", "B607", "B608", "B609", "B610", "B611", "B701", "B702", "B703"]
+skips = ["B101", "B601"]  # Skip assert_used and paramiko checks
