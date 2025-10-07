@@ -4,13 +4,13 @@
 # Used by: SeverityRulesEngine service to classify errors based on 5-minute rolling occurrence counts
 # 
 # Evaluation Logic:
-#   - Rules are evaluated in descending min_count order (highest threshold first)
-#   - First matching rule where (occurrence_count >= min_count) determines classification
+#   - Rules are evaluated in descending threshold order (highest threshold first)
+#   - First matching rule where (occurrence_count >= threshold) determines classification
 #   - If no environment-specific rule matches, falls back to 'default' rules
 #   - Enables severity escalation when frequency increases cross new thresholds
 #
 # Field Definitions:
-#   - min_count: Minimum error occurrences in 5-minute window to trigger this rule
+#   - threshold: Minimum error occurrences in 5-minute window to trigger this rule
 #   - priority: Jira issue priority field value (Highest, High, Medium, Low)
 #   - severity: Custom Jira severity field value (SEV1, SEV2, SEV3, SEV4)
 
@@ -21,19 +21,19 @@ version: "1.0"
 # ensure critical issues (50+ errors/5min) get highest priority while maintaining
 # signal-to-noise ratio for lower-volume errors
 production:
-  - min_count: 50
+  - threshold: 50
     priority: "Highest"
     severity: "SEV1"
     # Critical: 50+ errors in 5 minutes indicates widespread production failure
     # requiring immediate response and potential incident declaration
 
-  - min_count: 10
+  - threshold: 10
     priority: "High"
     severity: "SEV2"
     # High Impact: 10-49 errors in 5 minutes suggests significant but localized
     # production issue affecting multiple users; requires urgent investigation
 
-  - min_count: 1
+  - threshold: 1
     priority: "Medium"
     severity: "SEV3"
     # Baseline: Single production error warrants tracking and investigation
@@ -44,19 +44,19 @@ production:
 # production since staging tolerates more noise but serious problems still require
 # attention before release
 staging:
-  - min_count: 20
+  - threshold: 20
     priority: "High"
     severity: "SEV2"
     # Serious: 20+ errors in staging suggests systemic issue that will impact
     # production if deployed; blocks release until resolved
 
-  - min_count: 5
+  - threshold: 5
     priority: "Medium"
     severity: "SEV3"
     # Moderate: 5-19 errors indicates reproducible staging issue requiring
     # investigation before production deployment
 
-  - min_count: 1
+  - threshold: 1
     priority: "Low"
     severity: "SEV4"
     # Tracking: Single staging error logged for awareness; may be transient
@@ -66,13 +66,13 @@ staging:
 # Rationale: Development errors are expected during active coding; only high-frequency
 # issues warrant Jira tracking to avoid noise from normal development iteration
 development:
-  - min_count: 10
+  - threshold: 10
     priority: "Medium"
     severity: "SEV3"
     # Persistent Issue: 10+ errors in development suggests broken test suite
     # or widely-impacting code change requiring developer attention
 
-  - min_count: 1
+  - threshold: 1
     priority: "Low"
     severity: "SEV4"
     # Informational: Single development error logged for reference; normal
@@ -82,7 +82,7 @@ development:
 # Rationale: Applies to any environment not explicitly configured above (e.g., local,
 # qa, demo); conservative classification until environment-specific rules defined
 default:
-  - min_count: 1
+  - threshold: 1
     priority: "Low"
     severity: "SEV4"
     # Catch-All: Unknown environment defaults to lowest severity; prevents
@@ -90,7 +90,7 @@ default:
 
 # Configuration Notes:
 # 
-# 1. Threshold Tuning: Adjust min_count values based on observed error rates
+# 1. Threshold Tuning: Adjust threshold values based on observed error rates
 #    after initial deployment. Monitor for both false positives (too sensitive)
 #    and false negatives (too permissive).
 #
