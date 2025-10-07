@@ -54,23 +54,45 @@ patterns:
   - pattern: '(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
     replacement: '[PHONE]'
 
-  # Numeric IDs in common formats
-  # Matches: user_id=12345, userId:67890, id=999
-  # Result: user_id=[ID], userId=[ID], id=[ID]
+  # Numeric IDs in common formats (with key names)
+  # Matches: user_id=12345, userId:67890, id=999, customerId:456789
+  # Result: user_id=[ID], userId=[ID], id=[ID], customerId=[ID]
   # Note: Uses backreference \1 to preserve the key name
-  - pattern: '\b(user_id|userId|id)[:=]\s*\d+'
+  - pattern: '\b(user_id|userId|id|customer_id|customerId|order_id|orderId|account_id|accountId)[:=]\s*\d+'
     replacement: '\1=[ID]'
 
-  # Authentication Tokens (Bearer tokens, API keys)
-  # Matches: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9, Bearer abc123xyz
-  # Result: Bearer [TOKEN]
+  # Generic Numeric IDs (standalone sequences of 6+ digits)
+  # Matches: 123456, 9876543210, 100000000
+  # Result: [NUMERIC_ID]
+  # Note: Matches 6+ digit sequences to avoid false positives on years, small numbers, etc.
+  # Applied after specific ID patterns to preserve context when available
+  - pattern: '\b\d{6,}\b'
+    replacement: '[NUMERIC_ID]'
+
+  # JWT Tokens (JSON Web Tokens with three Base64 segments)
+  # Matches: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U
+  # Result: [JWT]
+  # Note: Must be before generic base64 pattern to avoid false positives
+  - pattern: '\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'
+    replacement: '[JWT]'
+
+  # Authentication Tokens (Bearer tokens)
+  # Matches: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9, Bearer abc123xyz, Authorization: Bearer token123
+  # Result: Bearer [TOKEN], Authorization: Bearer [TOKEN]
   - pattern: 'Bearer\s+[A-Za-z0-9\-_.=]+'
     replacement: 'Bearer [TOKEN]'
 
-  # API Keys and Secret Tokens (generic patterns)
-  # Matches: api_key=sk_live_abc123, token=ghp_1234567890abcdef
-  # Result: api_key=[TOKEN], token=[TOKEN]
-  - pattern: '\b(api_key|apiKey|token|secret|password)[:=]\s*[A-Za-z0-9\-_.=]+'
+  # Base64 Encoded Tokens (generic Base64 strings 20+ characters)
+  # Matches: base64:dGhpcyBpcyBhIHNlY3JldCB0b2tlbiB0aGF0IGlzIGxvbmc=, token=YWJjZGVmZ2hpamtsbW5vcHFyc3Q=
+  # Result: base64:[BASE64], token=[BASE64]
+  # Note: Only matches strings 20+ chars to avoid false positives on short encoded values
+  - pattern: '\b([A-Za-z0-9+/]{20,}={0,2})\b'
+    replacement: '[BASE64]'
+
+  # API Keys and Secret Tokens (with common prefixes)
+  # Matches: api_key=sk_live_abc123, token=ghp_1234567890abcdef, secret=pk_test_xyz789
+  # Result: api_key=[TOKEN], token=[TOKEN], secret=[TOKEN]
+  - pattern: '\b(api_key|apiKey|apikey|token|secret|password|accessToken|access_token)[:=]\s*[A-Za-z0-9\-_.=]+'
     replacement: '\1=[TOKEN]'
 
   # Social Security Numbers (US format)
@@ -90,12 +112,6 @@ patterns:
   # Result: sessionId=[ID], trackingId=[ID]
   - pattern: '\b(sessionId|session_id|trackingId|tracking_id|requestId|request_id)[:=]\s*[A-Za-z0-9]+'
     replacement: '\1=[ID]'
-
-  # AWS Account IDs (12-digit numbers)
-  # Matches: account: 123456789012
-  # Result: account: [AWS_ACCOUNT]
-  - pattern: '\b(account|accountId|account_id)[:=]?\s*\d{12}\b'
-    replacement: '\1=[AWS_ACCOUNT]'
 
   # Database Connection Strings (partial sanitization - passwords)
   # Matches: mongodb://user:password@host:port, postgres://user:pass@localhost
