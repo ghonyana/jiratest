@@ -66,7 +66,7 @@ from typing import Dict, Optional, Tuple, Any
 import boto3
 from botocore.exceptions import ClientError
 
-from utils.logging_config import get_logger
+from src.utils.logging_config import get_logger
 
 # Module-level logger for structured logging
 logger = get_logger(__name__)

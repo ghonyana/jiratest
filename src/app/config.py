@@ -103,7 +103,7 @@ Hot-Reload Support (per Section 0.7.1 requirement #6):
 import os
 from typing import Optional, Dict, Any
 
-from utils.secrets_manager import get_secret, get_json_secret
+from src.utils.secrets_manager import get_secret, get_json_secret
 
 
 class Config:
