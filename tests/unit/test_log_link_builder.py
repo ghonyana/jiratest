@@ -254,25 +254,24 @@ class TestLogLinkBuilder:
         result = builder.build_gcp_link(project, insert_id)
 
         # Parse URL to validate structure
+        # Note: urlparse treats semicolon as parameter separator (RFC 1808)
         parsed = parse.urlparse(result)
         assert parsed.scheme == "https"
         assert parsed.netloc == "console.cloud.google.com"
+        assert parsed.path == "/logs/query"
 
-        # Path should contain /logs/query with semicolon-separated query parameter
-        assert parsed.path.startswith("/logs/query;query=")
-
-        # Extract the encoded query from path
-        path_parts = parsed.path.split(";query=")
-        assert len(path_parts) == 2
-        encoded_query = path_parts[1].split("?")[0]
+        # The semicolon-separated parameter is in parsed.params
+        assert parsed.params.startswith("query=")
+        encoded_query = parsed.params[len("query="):]
 
         # Decode the query to validate format
         decoded_query = parse.unquote(encoded_query)
         assert decoded_query == f'insertId="{insert_id}"'
 
         # Validate project query parameter
-        assert "project=" in result
-        assert f"project={project}" in result
+        query_params = parse.parse_qs(parsed.query)
+        assert "project" in query_params
+        assert query_params["project"][0] == project
 
     def test_build_gcp_link_url_encoding(self, builder: LogLinkBuilder):
         """
@@ -325,9 +324,10 @@ class TestLogLinkBuilder:
         assert f"project={project}" in result
 
         # Decode and validate the insertId filter
+        # Note: urlparse treats semicolon as parameter separator
         parsed = parse.urlparse(result)
-        path_parts = parsed.path.split(";query=")
-        encoded_query = path_parts[1].split("?")[0]
+        assert parsed.params.startswith("query=")
+        encoded_query = parsed.params[len("query="):]
         decoded_query = parse.unquote(encoded_query)
         assert f'insertId="{insert_id}"' == decoded_query
 
@@ -344,9 +344,10 @@ class TestLogLinkBuilder:
         # Whitespace should be stripped
         assert "project=my-project" in result
 
+        # Note: urlparse treats semicolon as parameter separator
         parsed = parse.urlparse(result)
-        path_parts = parsed.path.split(";query=")
-        encoded_query = path_parts[1].split("?")[0]
+        assert parsed.params.startswith("query=")
+        encoded_query = parsed.params[len("query="):]
         decoded_query = parse.unquote(encoded_query)
         assert 'insertId="insert123"' == decoded_query
 
@@ -370,8 +371,9 @@ class TestLogLinkBuilder:
         assert parsed.netloc == "console.cloud.google.com"
 
         # Special characters should be URL-encoded
-        path_parts = parsed.path.split(";query=")
-        encoded_query = path_parts[1].split("?")[0]
+        # Note: urlparse treats semicolon as parameter separator
+        assert parsed.params.startswith("query=")
+        encoded_query = parsed.params[len("query="):]
         # The encoded query should contain encoded special characters
         assert "%2F" in encoded_query or "insert-with-special/chars:123" in parse.unquote(
             encoded_query
@@ -633,9 +635,10 @@ class TestLogLinkBuilderIntegration:
         assert project in result
 
         # Decode and validate insertId filter
+        # Note: urlparse treats semicolon as parameter separator
         parsed = parse.urlparse(result)
-        path_parts = parsed.path.split(";query=")
-        encoded_query = path_parts[1].split("?")[0]
+        assert parsed.params.startswith("query=")
+        encoded_query = parsed.params[len("query="):]
         decoded_query = parse.unquote(encoded_query)
         assert f'insertId="{insert_id}"' == decoded_query
 
