@@ -52,7 +52,6 @@ rules:
     service: "web-app-checkout"
     error_class: "PaymentProcessingError"
     assignee: "5f8e9a1b2c3d4e5f6a7b8c9d"  # Backend team lead (replace with actual account ID)
-    component: "Payment Processing"
     description: "Critical payment errors assigned to backend lead for immediate investigation"
 
   - priority: 2
@@ -93,14 +92,12 @@ rules:
     service: "web-app"
     path_regex: "/admin/.*"
     assignee: "6a9f8b2c3d4e5f7a8b9c0d1e"  # Admin panel owner (replace with actual account ID)
-    component: "Admin Panel"
     description: "Admin panel errors assigned to dedicated owner for access control issues"
 
   - priority: 15
     service: "api-gateway"
     error_class: "AuthenticationError"
     assignee: "7b0g9c3d4e5f8a9b0c1d2e3f"  # Security team lead (replace with actual account ID)
-    component: "Security"
     description: "Authentication failures in API gateway routed to security team"
 
   - priority: 16
@@ -113,7 +110,6 @@ rules:
     service: "data-pipeline"
     error_class: "DatabaseConnectionError"
     assignee: "8c1h0d4e5f9a0b1c2d3e4f5g"  # Database administrator (replace with actual account ID)
-    component: "Database"
     description: "Database connection failures assigned to DBA for investigation"
 
   - priority: 21
@@ -149,7 +145,6 @@ rules:
   - priority: 54
     service: "auth-service"
     assignee: "7b0g9c3d4e5f8a9b0c1d2e3f"  # Security team lead
-    component: "Security"
     description: "Authentication service errors assigned to security team by default"
 
   # ============================================================================
@@ -191,7 +186,7 @@ rules:
 # 4. ASSIGNEE vs COMPONENT:
 #    - assignee: Direct assignment (highest specificity)
 #    - component: Uses component's default assignee (flexible for team changes)
-#    - Both can be specified; assignee takes precedence in most Jira configurations
+#    - Only one can be specified per rule; choose assignee for direct routing or component for team-based routing
 #
 # 5. TESTING RULES:
 #    - Use OwnershipResolver.resolve(event) method to test rule matching
