@@ -74,6 +74,21 @@ from fakeredis import FakeRedis
 
 
 # =============================================================================
+# Pre-Import Environment Setup
+# =============================================================================
+# CRITICAL: Set environment variables BEFORE any application imports
+# Config classes validate environment variables in __init_subclass__ at import time
+
+os.environ.setdefault('TESTING', 'true')
+os.environ.setdefault('ENVIRONMENT', 'test')
+os.environ.setdefault('REDIS_HOST', 'localhost')
+os.environ.setdefault('ENABLE_MONGO', 'false')
+os.environ.setdefault('JIRA_BASE_URL', 'https://test.atlassian.net')
+os.environ.setdefault('PROJECT_KEY', 'ET')
+os.environ.setdefault('DEBUG', 'false')
+
+
+# =============================================================================
 # Pre-Import AWS Secrets Manager Mocking
 # =============================================================================
 # CRITICAL: Mock AWS Secrets Manager BEFORE importing any application modules
@@ -830,9 +845,68 @@ def app(mock_redis, mock_jira, mock_boto3_secrets) -> Generator[Any, None, None]
     # This ensures all routes use mocked Redis and Jira clients
     with flask_app.app_context():
         from flask import g
+        from unittest.mock import Mock
         g.redis_client = mock_redis
         g.mongo_client = None  # MongoDB disabled in tests
         g.config = flask_app.config
+        
+        # Initialize event route services with mocked dependencies
+        # This is CRITICAL - events.py has module-level service instances that must be initialized
+        # via the init_services() function before the /events endpoint can process requests
+        #
+        # NOTE: Integration tests use patch() to mock individual services for each test scenario.
+        # We initialize with basic Mock objects here that satisfy the init_services() type checks,
+        # then each test can use patch() to replace the module-level service instances as needed.
+        from src.app.routes.events import init_services
+        
+        # Create mock instances that can be reconfigured by test patches
+        mock_authenticator = Mock()
+        mock_authenticator.verify_vercel_signature = Mock(return_value=True)
+        mock_authenticator.verify_gcp_token = Mock(return_value=True)
+        
+        # Configure payload factory to return realistic NormalizedErrorEvent
+        from src.services.payload_adapters import PayloadAdapterFactory
+        mock_payload_factory = PayloadAdapterFactory()  # Use real factory, it will work with test payloads
+        
+        mock_dedup_service = Mock()
+        mock_dedup_service.is_duplicate = Mock(return_value=False)
+        mock_dedup_service.mark_processed = Mock(return_value=None)
+        
+        # Use real fingerprinter for consistent hash generation
+        from src.services.fingerprinter import ErrorFingerprinter
+        mock_fingerprinter = ErrorFingerprinter()
+        
+        # Use real frequency tracker with mock Redis for accurate counting
+        from src.services.frequency_tracker import FrequencyTracker
+        mock_freq_tracker = FrequencyTracker(mock_redis)
+        
+        # Use real severity engine and ownership resolver (they just read config files)
+        from src.services.severity_engine import SeverityRulesEngine
+        from src.services.ownership_resolver import OwnershipResolver
+        from src.services.comment_rate_limiter import CommentRateLimiter
+        
+        mock_severity_engine = SeverityRulesEngine(yaml_path='config/severity_rules.yaml')
+        mock_ownership_resolver = OwnershipResolver(yaml_path='config/ownership_rules.yaml')
+        
+        mock_jira_service = mock_jira  # Use the fixture's Jira mock
+        
+        # Use real rate limiter with mock Redis
+        mock_rate_limiter = CommentRateLimiter(mock_redis, environment='test')
+        
+        # Initialize services with mock instances
+        # Individual tests can patch src.app.routes.events module-level variables to customize behavior
+        init_services(
+            authenticator=mock_authenticator,
+            payload_factory=mock_payload_factory,
+            dedup_service=mock_dedup_service,
+            fingerprinter=mock_fingerprinter,
+            freq_tracker=mock_freq_tracker,
+            severity_engine=mock_severity_engine,
+            ownership_resolver=mock_ownership_resolver,
+            jira_service=mock_jira_service,
+            rate_limiter=mock_rate_limiter,
+            environment='test'
+        )
         
         # Yield test client to test function
         # with statement ensures proper context cleanup

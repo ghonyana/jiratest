@@ -118,23 +118,21 @@ class TestEventsEndpoint:
             caplog: Pytest log capture fixture for structured log validation
         """
         # Setup: Configure mocks for new issue creation scenario
-        with patch('src.utils.auth.WebhookAuthenticator.verify_vercel_signature') as mock_auth, \
-             patch('src.services.jira_integration.JiraIntegrationService') as MockJira, \
-             patch('src.services.deduplication.DeduplicationService') as MockDedup:
+        # Patch module-level service variables in events.py that were initialized by app fixture
+        with patch('src.app.routes.events._authenticator') as mock_auth, \
+             patch('src.app.routes.events._jira_service') as mock_jira_service, \
+             patch('src.app.routes.events._dedup_service') as mock_dedup_service:
             
-            # Mock webhook authentication to return True (valid signature)
-            mock_auth.return_value = True
+            # Mock authenticator.verify() method to return True (valid signature)
+            mock_auth.verify = Mock(return_value=True)
             
             # Mock deduplication service to return False (not a duplicate)
-            mock_dedup_instance = MockDedup.return_value
-            mock_dedup_instance.is_duplicate.return_value = False
+            mock_dedup_service.is_duplicate = Mock(return_value=False)
+            mock_dedup_service.mark_processed = Mock(return_value=None)
             
             # Mock Jira service for issue creation
-            mock_jira_instance = MockJira.return_value
-            mock_jira_instance.search_issue_by_fingerprint.return_value = None  # No existing issue
-            mock_created_issue = Mock()
-            mock_created_issue.key = 'ET-1234'
-            mock_jira_instance.create_bug_issue.return_value = 'ET-1234'
+            mock_jira_service.search_issue_by_fingerprint.return_value = None  # No existing issue
+            mock_jira_service.create_bug_issue.return_value = 'ET-1234'
             
             # Start performance timer
             start_time = time.perf_counter()
@@ -166,18 +164,18 @@ class TestEventsEndpoint:
             assert response_time_ms < 200, f"Response time {response_time_ms:.2f}ms exceeds 200ms SLO"
             
             # Assert: Webhook authentication was called
-            mock_auth.assert_called_once()
+            mock_auth.verify.assert_called_once()
             
             # Assert: Deduplication check was performed
-            mock_dedup_instance.is_duplicate.assert_called_once()
-            mock_dedup_instance.mark_processed.assert_called_once()
+            mock_dedup_service.is_duplicate.assert_called_once()
+            mock_dedup_service.mark_processed.assert_called_once()
             
             # Assert: Jira issue search was performed
-            mock_jira_instance.search_issue_by_fingerprint.assert_called_once()
+            mock_jira_service.search_issue_by_fingerprint.assert_called_once()
             
             # Assert: Jira issue creation was called with correct parameters
-            mock_jira_instance.create_bug_issue.assert_called_once()
-            create_call_args = mock_jira_instance.create_bug_issue.call_args
+            mock_jira_service.create_bug_issue.assert_called_once()
+            create_call_args = mock_jira_service.create_bug_issue.call_args
             
             # Validate created issue has correct labels
             # Expected labels: source:vercel, env:prod, service:web-app, errfp:<fingerprint>
@@ -191,8 +189,11 @@ class TestEventsEndpoint:
             assert len(freq_keys) > 0, "Frequency counter should be created in Redis"
             
             # Assert: Structured logs contain required fields (per Section 0.5.1)
-            log_records = [r for r in caplog.records if 'fingerprint_generated' in r.message or 'jira_issue_created' in r.message]
-            assert len(log_records) > 0, "Structured logs should be emitted"
+            # Logs are captured by pytest and visible in test output
+            # Check that specific log messages are present in caplog text
+            log_text = caplog.text
+            assert 'Error fingerprint generated' in log_text or 'New Jira issue created' in log_text, \
+                "Structured logs should contain key processing events"
     
     def test_gcp_webhook_adds_comment_to_existing_issue(
         self,
@@ -228,26 +229,26 @@ class TestEventsEndpoint:
             caplog: Pytest log capture fixture
         """
         # Setup: Configure mocks for existing issue scenario
-        with patch('src.utils.auth.WebhookAuthenticator.verify_gcp_token') as mock_auth, \
-             patch('src.services.jira_integration.JiraIntegrationService') as MockJira, \
-             patch('src.services.deduplication.DeduplicationService') as MockDedup, \
-             patch('src.services.comment_rate_limiter.CommentRateLimiter') as MockRateLimiter:
+        # Patch module-level service variables that were initialized by app fixture
+        with patch('src.app.routes.events._authenticator') as mock_auth, \
+             patch('src.app.routes.events._jira_service') as mock_jira_service, \
+             patch('src.app.routes.events._dedup_service') as mock_dedup_service, \
+             patch('src.app.routes.events._rate_limiter') as mock_rate_limiter:
             
-            # Mock GCP OIDC token authentication
-            mock_auth.return_value = True
+            # Mock authenticator.verify() method to return True (valid GCP token)
+            mock_auth.verify = Mock(return_value=True)
             
-            # Mock deduplication service
-            mock_dedup_instance = MockDedup.return_value
-            mock_dedup_instance.is_duplicate.return_value = False
+            # Mock deduplication service to return False (not a duplicate)
+            mock_dedup_service.is_duplicate = Mock(return_value=False)
+            mock_dedup_service.mark_processed = Mock(return_value=None)
             
             # Mock Jira service to return existing issue
-            mock_jira_instance = MockJira.return_value
-            mock_jira_instance.search_issue_by_fingerprint.return_value = 'ET-5678'
-            mock_jira_instance.add_comment.return_value = True
+            mock_jira_service.search_issue_by_fingerprint = Mock(return_value='ET-5678')
+            mock_jira_service.add_comment = Mock(return_value=True)
             
             # Mock comment rate limiter to allow comment
-            mock_rate_limiter_instance = MockRateLimiter.return_value
-            mock_rate_limiter_instance.should_comment.return_value = True
+            mock_rate_limiter.should_comment = Mock(return_value=True)
+            mock_rate_limiter.record_comment = Mock(return_value=None)
             
             # Pre-populate Redis with existing frequency counter
             # Simulate 5 previous occurrences in the 5-minute window
@@ -273,26 +274,27 @@ class TestEventsEndpoint:
             assert 'event_id' in response_data
             
             # Assert: GCP authentication was performed
-            mock_auth.assert_called_once()
+            mock_auth.verify.assert_called_once()
             
             # Assert: Jira issue search was performed
-            mock_jira_instance.search_issue_by_fingerprint.assert_called_once()
+            mock_jira_service.search_issue_by_fingerprint.assert_called_once()
             
             # Assert: NO new issue was created
-            mock_jira_instance.create_bug_issue.assert_not_called()
+            if hasattr(mock_jira_service, 'create_bug_issue'):
+                assert mock_jira_service.create_bug_issue.call_count == 0
             
             # Assert: Comment was added to existing issue
-            mock_jira_instance.add_comment.assert_called_once()
-            comment_call_args = mock_jira_instance.add_comment.call_args
+            mock_jira_service.add_comment.assert_called_once()
+            comment_call_args = mock_jira_service.add_comment.call_args
             assert comment_call_args[0][0] == 'ET-5678', "Comment should be added to existing issue"
             
             # Assert: Comment rate limiter was checked
-            mock_rate_limiter_instance.should_comment.assert_called_once()
-            mock_rate_limiter_instance.record_comment.assert_called_once()
+            mock_rate_limiter.should_comment.assert_called_once()
+            mock_rate_limiter.record_comment.assert_called_once()
             
             # Assert: Structured logs show comment added
-            log_messages = [r.message for r in caplog.records]
-            assert any('comment_added' in msg or 'jira_comment' in msg for msg in log_messages)
+            log_text = caplog.text
+            assert 'Comment added to existing Jira issue' in log_text or 'jira_comment_added' in log_text
     
     def test_duplicate_event_ignored(self, app, sample_vercel_payload, mock_redis, caplog):
         """
