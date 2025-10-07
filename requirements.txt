@@ -1,0 +1,30 @@
+# Production Dependencies for Error Triage → Jira Upserter Service
+# Python 3.11+ required
+
+# Web Framework
+flask==3.1.2
+gunicorn==23.0.0
+
+# Jira Integration
+jira==3.10.5
+
+# Data Storage and Caching
+redis==6.4.0
+pymongo==4.10.1
+
+# Data Validation and Configuration
+pydantic==2.10.4
+pyyaml==6.0.2
+python-dotenv==1.0.1
+
+# AWS Integration
+boto3==1.35.90
+
+# Monitoring and Observability
+prometheus-client==0.21.0
+python-json-logger==3.2.1
+
+# HTTP and Cryptography
+requests==2.32.3
+cryptography==44.0.0
+google-auth==2.37.0
