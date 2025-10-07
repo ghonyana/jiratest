@@ -411,9 +411,14 @@ class VercelPayloadAdapter:
                     logger.debug("Extracted service from deployment URL", extra={"service": service})
                     return service
 
-        # Fallback to generic service name
-        logger.warning("Could not extract service name, using default", extra={"deployment_url": deployment_url})
-        return "vercel-app"
+        # CRITICAL: Cannot determine service name - this is a required field for error triage
+        logger.error(
+            "Cannot extract service name from payload",
+            extra={"deployment_url": deployment_url, "has_service_field": 'service' in payload}
+        )
+        raise ValueError(
+            "Vercel payload missing required 'service' field and 'deployment.url' for service extraction"
+        )
 
     def _extract_environment(self, payload: Dict[str, Any]) -> str:
         """
@@ -424,10 +429,21 @@ class VercelPayloadAdapter:
 
         Returns:
             Normalized environment string (prod/staging/dev)
+
+        Raises:
+            ValueError: If environment field is missing or empty
         """
-        environment = payload.get('environment', 'production').strip()
+        environment = payload.get('environment', '').strip()
         if not environment:
-            environment = 'production'
+            # CRITICAL: Cannot determine environment - required for severity classification
+            # Never default to 'production' - that could incorrectly escalate issues
+            logger.error(
+                "Cannot extract environment from Vercel payload",
+                extra={"available_fields": list(payload.keys())}
+            )
+            raise ValueError(
+                "Vercel payload missing required 'environment' field"
+            )
 
         logger.debug("Extracted environment from payload", extra={"environment": environment})
         return environment

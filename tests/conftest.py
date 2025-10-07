@@ -826,9 +826,14 @@ def app(mock_redis, mock_jira, mock_boto3_secrets) -> Generator[Any, None, None]
     os.environ['JIRA_BASE_URL'] = 'https://test.atlassian.net'
     os.environ['PROJECT_KEY'] = 'ET'
     
-    # Create Flask application using factory pattern
-    # Use 'development' config name but override with test settings
-    flask_app = create_app('development')
+    # CRITICAL FIX: Patch Redis client creation BEFORE create_app() is called
+    # This prevents the app from trying to connect to a real Redis instance at localhost:6379
+    # and ensures it uses the mock_redis (FakeRedis) fixture instead.
+    # The patch must target 'src.app.Redis' since src/app/__init__.py does "from redis import Redis"
+    with patch('src.app.Redis', return_value=mock_redis):
+        # Create Flask application using factory pattern
+        # Use 'development' config name but override with test settings
+        flask_app = create_app('development')
     
     # Override configuration with test-specific settings
     flask_app.config.update({
@@ -863,6 +868,7 @@ def app(mock_redis, mock_jira, mock_boto3_secrets) -> Generator[Any, None, None]
         mock_authenticator = Mock()
         mock_authenticator.verify_vercel_signature = Mock(return_value=True)
         mock_authenticator.verify_gcp_token = Mock(return_value=True)
+        mock_authenticator.verify = Mock(return_value=True)  # Mock the verify method that endpoints call
         
         # Configure payload factory to return realistic NormalizedErrorEvent
         from src.services.payload_adapters import PayloadAdapterFactory

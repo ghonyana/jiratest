@@ -367,7 +367,17 @@ def handle_webhook_event():
         # ====================================================================
 
         # Validate Content-Type header
-        validate_content_type(request)
+        try:
+            validate_content_type(request)
+        except ValueError as e:
+            logger.warning(
+                "Invalid Content-Type header",
+                extra={"action": "invalid_content_type", "error_detail": str(e)},
+            )
+            metrics_collector.increment_counter(
+                "errors_total", {"environment": _environment, "error_type": "invalid_content_type"}
+            )
+            return jsonify({"error": "Bad Request", "detail": str(e)}), 400
 
         # Detect webhook source from headers
         try:
@@ -423,17 +433,17 @@ def handle_webhook_event():
             event_id = normalized_event.event_id
         except ValueError as e:
             logger.error(
-                "Payload transformation failed",
+                "Payload validation failed: missing required fields",
                 extra={
-                    "action": "payload_transform_failed",
+                    "action": "payload_validation_failed",
                     "source": source,
                     "error_detail": str(e),
                 },
             )
             metrics_collector.increment_counter(
-                "errors_total", {"environment": _environment, "error_type": "malformed_payload"}
+                "errors_total", {"environment": _environment, "error_type": "validation_error"}
             )
-            return jsonify({"error": "Malformed payload", "detail": str(e)}), 400
+            return jsonify({"error": "Payload validation failed: missing required fields", "detail": str(e)}), 400
         except Exception as e:
             logger.error(
                 "Unexpected error during payload transformation",
@@ -578,13 +588,18 @@ def handle_webhook_event():
         try:
             issue_key = _jira_service.search_issue_by_fingerprint(fingerprint)
         except Exception as e:
+            # Check if it's a timeout error for more specific logging
+            from requests.exceptions import Timeout
+            error_msg = "Jira API timeout" if isinstance(e, Timeout) else "Jira search failed"
+            error_type = "jira_timeout" if isinstance(e, Timeout) else "jira_api_error"
+            
             logger.error(
-                "Jira search failed",
+                error_msg,
                 extra={
                     "action": "jira_search_failed",
                     "event_id": event_id,
                     "fingerprint": fingerprint,
-                    "error_type": "jira_api_error",
+                    "error_type": error_type,
                 },
                 exc_info=True,
             )
@@ -619,10 +634,52 @@ def handle_webhook_event():
                 },
             )
 
-            # Check if we should add a comment (rate limit enforcement)
-            # Note: We don't have previous severity to detect escalation in this flow
-            # In production, this would come from Jira custom field or database
-            severity_increased = False  # Simplified for now
+            # Check if severity has increased (for priority escalation)
+            # Retrieve previous severity from Redis cache
+            severity_cache_key = f"severity:{_environment}:{fingerprint}"
+            try:
+                previous_severity = _freq_tracker.redis_client.get(severity_cache_key)
+            except Exception as e:
+                logger.warning(
+                    "Failed to retrieve previous severity from Redis",
+                    extra={
+                        "action": "redis_severity_get_failed",
+                        "error": str(e),
+                        "fingerprint": fingerprint,
+                    },
+                )
+                previous_severity = None
+            
+            # Define severity ordering (SEV1 is highest, SEV4 is lowest)
+            severity_levels = {"SEV1": 1, "SEV2": 2, "SEV3": 3, "SEV4": 4}
+            severity_increased = False
+            
+            if previous_severity and previous_severity in severity_levels and severity in severity_levels:
+                # Check if new severity is higher (lower number means higher severity)
+                if severity_levels[severity] < severity_levels[previous_severity]:
+                    severity_increased = True
+                    logger.info(
+                        "Severity level increased",
+                        extra={
+                            "action": "severity_increased",
+                            "fingerprint": fingerprint,
+                            "previous_severity": previous_severity,
+                            "new_severity": severity,
+                        },
+                    )
+            
+            # Store current severity in Redis cache (TTL: 7 days)
+            try:
+                _freq_tracker.redis_client.setex(severity_cache_key, 7 * 24 * 3600, severity)
+            except Exception as e:
+                logger.warning(
+                    "Failed to store severity in Redis",
+                    extra={
+                        "action": "redis_severity_set_failed",
+                        "error": str(e),
+                        "fingerprint": fingerprint,
+                    },
+                )
 
             should_add_comment = _rate_limiter.should_comment(issue_key, severity_increased)
 
@@ -654,19 +711,24 @@ def handle_webhook_event():
                     )
 
                 except Exception as e:
+                    # Check if it's a timeout error for more specific logging
+                    from requests.exceptions import Timeout
+                    error_msg = "Jira API timeout (add comment)" if isinstance(e, Timeout) else "Failed to add Jira comment"
+                    error_type = "jira_timeout" if isinstance(e, Timeout) else "jira_api_error"
+                    
                     logger.error(
-                        "Failed to add Jira comment",
+                        error_msg,
                         extra={
                             "action": "jira_comment_failed",
                             "event_id": event_id,
                             "fingerprint": fingerprint,
                             "jira_issue_key": issue_key,
-                            "error_type": "jira_api_error",
+                            "error_type": error_type,
                         },
                         exc_info=True,
                     )
                     metrics_collector.increment_counter(
-                        "errors_total", {"environment": _environment, "error_type": "jira_api_error"}
+                        "errors_total", {"environment": _environment, "error_type": error_type}
                     )
             else:
                 logger.info(
@@ -703,19 +765,24 @@ def handle_webhook_event():
                     )
 
                 except Exception as e:
+                    # Check if it's a timeout error for more specific logging
+                    from requests.exceptions import Timeout
+                    error_msg = "Jira API timeout (escalate priority)" if isinstance(e, Timeout) else "Failed to escalate Jira priority"
+                    error_type = "jira_timeout" if isinstance(e, Timeout) else "jira_api_error"
+                    
                     logger.error(
-                        "Failed to escalate Jira priority",
+                        error_msg,
                         extra={
                             "action": "jira_escalate_failed",
                             "event_id": event_id,
                             "fingerprint": fingerprint,
                             "jira_issue_key": issue_key,
-                            "error_type": "jira_api_error",
+                            "error_type": error_type,
                         },
                         exc_info=True,
                     )
                     metrics_collector.increment_counter(
-                        "errors_total", {"environment": _environment, "error_type": "jira_api_error"}
+                        "errors_total", {"environment": _environment, "error_type": error_type}
                     )
 
         else:
@@ -756,18 +823,23 @@ def handle_webhook_event():
                 )
 
             except Exception as e:
+                # Check if it's a timeout error for more specific logging
+                from requests.exceptions import Timeout
+                error_msg = "Jira API timeout (create issue)" if isinstance(e, Timeout) else "Failed to create Jira issue"
+                error_type = "jira_timeout" if isinstance(e, Timeout) else "jira_api_error"
+                
                 logger.error(
-                    "Failed to create Jira issue",
+                    error_msg,
                     extra={
                         "action": "jira_create_failed",
                         "event_id": event_id,
                         "fingerprint": fingerprint,
-                        "error_type": "jira_api_error",
+                        "error_type": error_type,
                     },
                     exc_info=True,
                 )
                 metrics_collector.increment_counter(
-                    "errors_total", {"environment": _environment, "error_type": "jira_api_error"}
+                    "errors_total", {"environment": _environment, "error_type": error_type}
                 )
                 # Don't fail the request - return 202 and log for retry
                 return (

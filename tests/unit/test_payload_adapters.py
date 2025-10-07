@@ -75,6 +75,7 @@ def sample_vercel_payload_minimal() -> Dict[str, Any]:
     return {
         "message": "Error: Service unavailable",
         "timestamp": 1736937045123,  # 2025-01-15
+        "environment": "production",  # Required field for severity classification
         "deployment": {
             "id": "dpl_minimal",
             "url": "minimal-app-xyz.vercel.app"
@@ -366,6 +367,7 @@ class TestVercelPayloadAdapter:
             payload = {
                 "message": "Test error",
                 "timestamp": 1705320645123,
+                "environment": "production",  # Required field
                 "deployment": {
                     "id": "dpl_test",
                     "url": url
@@ -394,6 +396,7 @@ class TestVercelPayloadAdapter:
             payload = {
                 "message": message,
                 "timestamp": 1705320645123,
+                "environment": "production",  # Required field
                 "deployment": {
                     "id": "dpl_test",
                     "url": "test-app-xyz.vercel.app"
@@ -423,8 +426,11 @@ class TestVercelPayloadAdapter:
             "message": "Test message",
             "timestamp": 1705320645123,
             "level": vercel_level,
-            "host": "test-app.vercel.app",
-            "deploymentId": "dpl_test",
+            "environment": "production",  # Required field for severity classification
+            "deployment": {
+                "id": "dpl_test",
+                "url": "test-app.vercel.app"
+            }
         }
         event = vercel_adapter.transform(payload)
         assert event.environment == expected_env
@@ -456,6 +462,7 @@ class TestVercelPayloadAdapter:
         payload = {
             "message": "Test error",
             "timestamp": 1736937045123,
+            "environment": "production",  # Required field for severity classification
             "deployment": {
                 "id": "dpl_abc123",
                 "url": "my-app-xyz.vercel.app"
@@ -478,6 +485,7 @@ class TestVercelPayloadAdapter:
         payload = {
             "message": "Test error",
             "timestamp": 1736937045123,
+            "environment": "production",  # Required field for severity classification
             "deployment": {
                 "id": "dpl_abc123",
                 "url": "my-app-xyz.vercel.app"
@@ -519,6 +527,7 @@ class TestVercelPayloadAdapter:
         """
         payload = {
             "message": "Test error",
+            "environment": "production",  # Required field for severity classification
             "deployment": {
                 "id": "dpl_test",
                 "url": "test-app-xyz.vercel.app"
@@ -543,7 +552,9 @@ class TestVercelPayloadAdapter:
         """
         payload = {
             "message": "Test error",
-            "timestamp": 1736937045123
+            "timestamp": 1736937045123,
+            "environment": "production",  # Required field for severity classification
+            "service": "vercel-app"  # Provide service field when deployment is missing
             # Missing 'deployment' field
         }
 
@@ -1096,6 +1107,7 @@ class TestEdgeCases:
             "message": "Error: test",
             "timestamp": 1736937045123,  # 2025-01-15
             "level": "error",
+            "environment": "production",  # Required field for severity classification
             "deployment": {
                 "id": "dpl_test",
                 "url": "test-app.vercel.app"
@@ -1156,8 +1168,11 @@ class TestEdgeCases:
             "message": special_message,
             "timestamp": 1705320645123,
             "level": "error",
-            "host": "test-app.vercel.app",
-            "deploymentId": "dpl_test",
+            "environment": "production",  # Required field for severity classification
+            "deployment": {
+                "id": "dpl_test",
+                "url": "test-app.vercel.app"
+            }
         }
         event = vercel_adapter.transform(payload)
 
@@ -1177,8 +1192,11 @@ class TestEdgeCases:
             "message": "Test error",
             "timestamp": 1000,  # Very early timestamp
             "level": "error",
-            "host": "test-app.vercel.app",
-            "deploymentId": "dpl_test",
+            "environment": "production",  # Required field for severity classification
+            "deployment": {
+                "id": "dpl_test",
+                "url": "test-app.vercel.app"
+            }
         }
         event_early = vercel_adapter.transform(payload_early)
         assert isinstance(event_early.occurred_at, datetime)
@@ -1193,6 +1211,7 @@ class TestEdgeCases:
                 "type": "cloud_run_revision",
                 "labels": {"service_name": "test-service"},
             },
+            "labels": {"environment": "production"},  # Required for severity classification
         }
         encoded_data = base64.b64encode(json.dumps(log_entry).encode()).decode()
         payload_future = {
