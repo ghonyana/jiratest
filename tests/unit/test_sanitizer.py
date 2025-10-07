@@ -48,6 +48,12 @@ def valid_patterns_config() -> List[Dict[str, str]]:
     
     Returns valid YAML-compatible pattern list matching the structure
     defined in config/sanitization_patterns.yaml per Section 0.5.1.
+    
+    Note: Patterns use capturing groups () not non-capturing groups (?:)
+    to enable backreferences in replacement strings like \1=[ID].
+    
+    Patterns are applied in order, with more specific patterns first to ensure
+    correct matching (e.g., braced IDs before simple IDs).
     """
     return [
         {
@@ -59,7 +65,13 @@ def valid_patterns_config() -> List[Dict[str, str]]:
             "replacement": "[EMAIL]"
         },
         {
-            "pattern": r"\b(?:user_id|userId|id)[:=]\s*\d+",
+            # Match IDs in curly braces first (more specific): user_id={12345}
+            "pattern": r"\b(user_id|userId|id)\s*=\s*\{\d+\}",
+            "replacement": r"\1={[ID]}"
+        },
+        {
+            # Match IDs with = or : separator, capturing identifier and normalizing spaces
+            "pattern": r"\b(user_id|userId|id)\s*[:=]\s*\d+",
             "replacement": r"\1=[ID]"
         },
         {
@@ -67,7 +79,7 @@ def valid_patterns_config() -> List[Dict[str, str]]:
             "replacement": "Bearer [TOKEN]"
         },
         {
-            "pattern": r"\b(?:token|auth_token|api_key)[:=]\s*['\"]?[A-Za-z0-9_\-\.]+['\"]?",
+            "pattern": r"\b(token|auth_token|api_key)[:=]\s*['\"]?[A-Za-z0-9_\-\.]+['\"]?",
             "replacement": r"\1=[TOKEN]"
         }
     ]
@@ -354,7 +366,7 @@ class TestPatternLoading:
         sanitizer = PIISanitizer(config_path=str(mock_yaml_file))
         assert sanitizer._patterns_loaded is True
         assert len(sanitizer._patterns) > 0
-        assert sanitizer.get_pattern_count() == 5  # From fixture
+        assert sanitizer.get_pattern_count() == 6  # From fixture (UUID, EMAIL, ID-braced, ID, Bearer, token)
 
     def test_load_patterns_file_not_found(self, tmp_path: Path):
         """Test FileNotFoundError when YAML file doesn't exist."""
@@ -462,7 +474,7 @@ class TestPatternLoading:
         raw_patterns = sanitizer.load_patterns(str(mock_yaml_file))
         
         assert isinstance(raw_patterns, list)
-        assert len(raw_patterns) == 5
+        assert len(raw_patterns) == 6  # UUID, EMAIL, ID-braced, ID, Bearer, token
         for pattern, replacement in raw_patterns:
             assert isinstance(pattern, str)
             assert isinstance(replacement, str)
@@ -801,8 +813,8 @@ class TestCompilePatterns:
         sanitizer = PIISanitizer.__new__(PIISanitizer)
         compiled, raw = sanitizer._compile_patterns(valid_patterns_config)
         
-        assert len(compiled) == 5
-        assert len(raw) == 5
+        assert len(compiled) == 6  # UUID, EMAIL, ID-braced, ID, Bearer, token
+        assert len(raw) == 6  # Same patterns in raw format
         
         # Verify compiled patterns are regex Pattern objects
         for pattern, replacement in compiled:
