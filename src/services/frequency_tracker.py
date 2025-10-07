@@ -67,8 +67,8 @@ from typing import Optional
 from redis import Redis
 from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 
-from utils.logging_config import get_logger
-from utils.metrics_collector import record_redis_latency, increment_error
+from src.utils.logging_config import get_logger
+from src.utils.metrics_collector import record_redis_latency, increment_error
 
 
 # Initialize module logger
