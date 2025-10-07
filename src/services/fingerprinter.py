@@ -102,15 +102,15 @@ class ErrorFingerprinter:
 
         # Patterns to identify library/framework code that should be excluded
         # from fingerprints to focus on application-specific stack frames
+        # Patterns match with or without leading/trailing slashes
         self._library_path_patterns = [
-            re.compile(r'/node_modules/'),
-            re.compile(r'/site-packages/'),
-            re.compile(r'\\node_modules\\'),
-            re.compile(r'\\site-packages\\'),
-            re.compile(r'/dist/'),
-            re.compile(r'\\dist\\'),
-            re.compile(r'<anonymous>'),
-            re.compile(r'internal/'),
+            re.compile(r'node_modules'),  # Matches anywhere in path
+            re.compile(r'site-packages'),  # Matches anywhere in path
+            re.compile(r'dist/'),  # Distribution directory
+            re.compile(r'\\dist\\'),  # Distribution directory (Windows)
+            re.compile(r'<anonymous>'),  # Anonymous functions
+            re.compile(r'internal/'),  # Node.js internal modules
+            re.compile(r'internal\\'),  # Node.js internal modules (Windows)
         ]
 
         logger.info(
