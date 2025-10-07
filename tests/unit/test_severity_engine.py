@@ -31,8 +31,8 @@ from typing import Any, Dict, List, Tuple
 import pytest
 import yaml
 
-from models.severity_rule import RuleCondition, SeverityRule
-from services.severity_engine import SeverityRulesEngine
+from src.models.severity_rule import RuleCondition, SeverityRule
+from src.services.severity_engine import SeverityRulesEngine
 
 
 # =============================================================================
@@ -1050,7 +1050,7 @@ def test_configuration_reload(tmp_path: Path) -> None:
     # Load first configuration
     first_config = {
         "production": [
-            {"threshold": 100, priority: "Critical", "severity": "SEV0"},
+            {"threshold": 100, "priority": "Critical", "severity": "SEV0"},
         ]
     }
     first_yaml = tmp_path / "first.yaml"

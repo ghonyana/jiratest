@@ -83,7 +83,7 @@ from typing import Dict, Optional, Tuple
 
 import yaml
 
-from models.severity_rule import RuleCondition, SeverityRule
+from src.models.severity_rule import RuleCondition, SeverityRule
 
 # Initialize module logger with structured context
 logger = logging.getLogger(__name__)
@@ -248,6 +248,10 @@ class SeverityRulesEngine:
             # safe_load() only constructs simple Python objects (dict, list, str, int)
             # and never arbitrary Python objects or functions
             rules_config = yaml.safe_load(yaml_content)
+
+            # Handle empty YAML file (None) as valid empty configuration
+            if rules_config is None:
+                rules_config = {}
 
             # Validate top-level structure is a dictionary
             if not isinstance(rules_config, dict):
