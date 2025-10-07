@@ -64,8 +64,8 @@ from redis import Redis
 from redis.exceptions import RedisError, ConnectionError, TimeoutError
 
 # Internal imports from depends_on_files
-from utils.logging_config import get_logger
-from utils.metrics_collector import record_redis_latency
+from src.utils.logging_config import get_logger
+from src.utils.metrics_collector import record_redis_latency
 
 
 class DeduplicationService:
