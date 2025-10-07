@@ -70,8 +70,8 @@ from typing import Tuple
 
 from flask import Blueprint, Response
 
-from utils.logging_config import get_logger
-from utils.metrics_collector import MetricsCollector
+from src.utils.logging_config import get_logger
+from src.utils.metrics_collector import MetricsCollector
 
 # Initialize module logger for structured JSON logging
 logger = get_logger(__name__)

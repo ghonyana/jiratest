@@ -63,7 +63,7 @@ from pymongo import MongoClient
 from jira import JIRA
 
 # Internal imports - from depends_on_files only
-from utils.logging_config import get_logger
+from src.utils.logging_config import get_logger
 
 
 # Initialize logger for this module with structured JSON logging
