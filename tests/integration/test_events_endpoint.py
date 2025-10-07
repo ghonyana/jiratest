@@ -320,23 +320,16 @@ class TestEventsEndpoint:
             mock_redis: FakeRedis instance
             caplog: Log capture fixture
         """
-        # Setup: Mark event as already processed in deduplication cache
-        event_id = sample_vercel_payload.get('traceId', 'default_event_id')
-        mock_redis.setex(f'dedup:{event_id}', 3600, '1')
-        
-        with patch('src.utils.auth.WebhookAuthenticator.verify_vercel_signature') as mock_auth, \
-             patch('src.services.jira_integration.JiraIntegrationService') as MockJira, \
-             patch('src.services.deduplication.DeduplicationService') as MockDedup:
+        # Setup: Patch module-level service variables
+        with patch('src.app.routes.events._authenticator') as mock_auth, \
+             patch('src.app.routes.events._jira_service') as mock_jira_service, \
+             patch('src.app.routes.events._dedup_service') as mock_dedup_service:
             
             # Mock authentication
-            mock_auth.return_value = True
+            mock_auth.verify = Mock(return_value=True)
             
             # Mock deduplication service to return True (duplicate detected)
-            mock_dedup_instance = MockDedup.return_value
-            mock_dedup_instance.is_duplicate.return_value = True
-            
-            # Mock Jira service (should not be called)
-            mock_jira_instance = MockJira.return_value
+            mock_dedup_service.is_duplicate = Mock(return_value=True)
             
             # Execute: POST request with duplicate event
             response = app.post(
@@ -356,16 +349,19 @@ class TestEventsEndpoint:
             assert response_data['status'] == 'accepted'
             
             # Assert: Deduplication check was performed
-            mock_dedup_instance.is_duplicate.assert_called_once()
+            mock_dedup_service.is_duplicate.assert_called_once()
             
-            # Assert: NO Jira operations were performed
-            mock_jira_instance.search_issue_by_fingerprint.assert_not_called()
-            mock_jira_instance.create_bug_issue.assert_not_called()
-            mock_jira_instance.add_comment.assert_not_called()
+            # Assert: NO Jira operations were performed (mock should not have these methods called)
+            if hasattr(mock_jira_service, 'search_issue_by_fingerprint'):
+                assert mock_jira_service.search_issue_by_fingerprint.call_count == 0
+            if hasattr(mock_jira_service, 'create_bug_issue'):
+                assert mock_jira_service.create_bug_issue.call_count == 0
+            if hasattr(mock_jira_service, 'add_comment'):
+                assert mock_jira_service.add_comment.call_count == 0
             
             # Assert: Structured logs show duplicate detected
-            log_messages = [r.message for r in caplog.records]
-            assert any('duplicate' in msg.lower() for msg in log_messages), \
+            log_text = caplog.text
+            assert 'duplicate' in log_text.lower(), \
                 "Logs should indicate duplicate event detected"
     
     def test_unauthorized_vercel_request_rejected(self, app, sample_vercel_payload, caplog):
