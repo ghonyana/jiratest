@@ -35,9 +35,9 @@ from unittest.mock import patch
 
 import pytest
 
-from models.error_event import NormalizedErrorEvent
-from services.fingerprinter import ErrorFingerprinter
-from services.sanitizer import PIISanitizer
+from src.models.error_event import NormalizedErrorEvent
+from src.services.fingerprinter import ErrorFingerprinter
+from src.services.sanitizer import PIISanitizer
 
 
 # =============================================================================
@@ -802,10 +802,8 @@ class TestFallbackBehavior:
         
         This is important for consistent fingerprinting when stack trace is unavailable.
         """
-        fingerprinter = ErrorFingerprinter()
-        
         # Create event with long message and no stack trace
-        long_message = "A" * 100  # 100 character message
+        long_message = "Database connection timeout occurred while processing request"  # 61 character message
         
         event = NormalizedErrorEvent(
             source="vercel",
@@ -819,7 +817,11 @@ class TestFallbackBehavior:
             occurred_at=datetime(2025, 1, 15, 10, 0, 0),
         )
         
-        fingerprint = fingerprinter.generate_fingerprint(event)
+        # Mock sanitizer to return message unchanged for this test
+        # This isolates the truncation logic from sanitization behavior
+        with patch.object(PIISanitizer, 'sanitize', return_value=long_message):
+            fingerprinter = ErrorFingerprinter()
+            fingerprint = fingerprinter.generate_fingerprint(event)
         
         # Expected fingerprint should use first 50 chars in place of stack frame
         message_truncated = long_message[:50]

@@ -37,8 +37,8 @@ import logging
 import re
 from typing import Optional
 
-from models.error_event import NormalizedErrorEvent
-from services.sanitizer import PIISanitizer
+from src.models.error_event import NormalizedErrorEvent
+from src.services.sanitizer import PIISanitizer
 
 # Initialize logger for structured logging per Section 0.7.2 observability requirement
 logger = logging.getLogger(__name__)
