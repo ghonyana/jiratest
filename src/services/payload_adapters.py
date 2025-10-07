@@ -55,8 +55,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from models.error_event import NormalizedErrorEvent
-from services.log_link_builder import LogLinkBuilder
+from src.models.error_event import NormalizedErrorEvent
+from src.services.log_link_builder import LogLinkBuilder
 
 # Initialize module logger for structured logging
 logger = logging.getLogger(__name__)
