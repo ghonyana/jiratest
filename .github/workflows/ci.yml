@@ -311,7 +311,7 @@ jobs:
       # Upload JSON reports as artifacts for debugging and auditing
       - name: Upload Security Reports as Artifacts
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: security-reports
           path: |
@@ -389,7 +389,7 @@ jobs:
       # Upload test results and coverage artifacts
       - name: Upload Test Results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: test-results
           path: |
