@@ -57,7 +57,7 @@ from typing import Dict, List, Optional, Pattern
 import re
 import yaml
 
-from models.error_event import NormalizedErrorEvent
+from src.models.error_event import NormalizedErrorEvent
 
 
 @dataclass
